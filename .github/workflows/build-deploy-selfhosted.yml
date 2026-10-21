@@ -1,0 +1,196 @@
+# =============================================================================
+# Build & Deploy (fork 二开用)
+#   - push 到 main / 打 v* tag / 手动触发 → 构建镜像推送到 ghcr.io/<owner>/sub2api
+#   - 构建成功后，按 vars.DEPLOY_TARGETS 列出的 GitHub Environment 逐台 SSH 部署
+#     （docker compose pull && docker compose up -d）
+# 方案 B：部署机在内网 / 不开放 SSH。每台部署机上安装 GitHub self-hosted runner，
+#   runner 主动出站连接 GitHub（只需出站 443），无需任何 SSH secrets。
+#   构建仍在 GitHub 托管 runner 上完成；部署 job 跑在打了对应 label 的自托管 runner 上。
+# 与 build-deploy.yml 二选一，不要同时启用。
+# =============================================================================
+name: Build & Deploy (self-hosted)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: '构建后是否部署'
+        type: boolean
+        default: true
+
+concurrency:
+  group: build-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  # 默认只构建 amd64；需要 arm64 部署机时在仓库 Variables 设置 IMAGE_PLATFORMS=linux/amd64,linux/arm64
+  PLATFORMS: ${{ vars.IMAGE_PLATFORMS || 'linux/amd64' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      deploy_tag: ${{ steps.vars.outputs.deploy_tag }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compute image name / tags
+        id: vars
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"   # GHCR 要求小写
+          short_sha="${GITHUB_SHA::7}"
+          version=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          {
+            echo "image=${REGISTRY}/${owner}/sub2api"
+            echo "deploy_tag=sha-${short_sha}"
+            echo "version=${version}"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            # main 分支 → latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # 每次构建 → sha-<7位>（不可变，部署用这个）
+            type=raw,value=${{ steps.vars.outputs.deploy_tag }}
+            # v1.2.3 tag → 1.2.3 / 1.2 / 1
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+          labels: |
+            org.opencontainers.image.title=sub2api
+            org.opencontainers.image.description=Sub2API fork build
+
+      - name: Set up QEMU
+        if: contains(env.PLATFORMS, 'arm64')
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 上游 Dockerfile 默认用 goproxy.cn（面向国内），GitHub runner 在海外，改回官方源
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.vars.outputs.date }}
+            GOPROXY=https://proxy.golang.org,direct
+            GOSUMDB=sum.golang.org
+          cache-from: type=gha,scope=sub2api
+          cache-to: type=gha,scope=sub2api,mode=max
+          provenance: false
+
+  deploy:
+    needs: build
+    if: >-
+      vars.DEPLOY_TARGETS != '' &&
+      (github.event_name != 'workflow_dispatch' || inputs.deploy)
+    # 每台部署机的 runner 注册时加上 label：sub2api-<target>，例如 sub2api-prod-1
+    runs-on: [self-hosted, linux, 'sub2api-${{ matrix.target }}']
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        # 未设置 DEPLOY_TARGETS 时用空数组。fromJSON('') 会让整次 workflow 失败，
+        # 空数组则只跳过部署、保留构建（与「不设置 = 只构建不部署」一致）。
+        target: ${{ fromJSON(vars.DEPLOY_TARGETS || '[]') }}
+    environment:
+      name: ${{ matrix.target }}
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      IMAGE_TAG: ${{ needs.build.outputs.deploy_tag }}
+      # 部署目录：Environment variable（非机密，用 vars）；未设置时默认 /opt/sub2api
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/sub2api' }}
+    steps:
+      - name: Checkout (for compose file sync)
+        if: vars.DEPLOY_SYNC_COMPOSE == 'true'
+        uses: actions/checkout@v6
+
+      - name: Sync docker-compose.yml
+        if: vars.DEPLOY_SYNC_COMPOSE == 'true'
+        run: install -m 644 deploy/docker-compose.yml "$DEPLOY_PATH/docker-compose.yml"
+
+      - name: Login to GHCR (job token, temp config)
+        run: |
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/docker-config"
+          echo "${{ secrets.GITHUB_TOKEN }}" | DOCKER_CONFIG="$RUNNER_TEMP/docker-config" \
+            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: docker compose pull && up -d
+        working-directory: ${{ env.DEPLOY_PATH }}
+        run: |
+          set -eu
+          test -f .env || { echo "::error::$DEPLOY_PATH/.env 不存在"; exit 1; }
+          mkdir -p data postgres_data redis_data
+          set_env() {
+            if grep -q "^$1=" .env; then sed -i "s|^$1=.*|$1=$2|" .env; else printf '%s=%s\n' "$1" "$2" >> .env; fi
+          }
+          prev_tag="$(grep '^SUB2API_TAG=' .env | cut -d= -f2- || true)"
+          set_env SUB2API_IMAGE "$IMAGE"
+          set_env SUB2API_TAG "$IMAGE_TAG"
+          echo "Deploying $IMAGE:$IMAGE_TAG (previous: ${prev_tag:-none})"
+          docker compose pull
+          docker compose up -d --remove-orphans
+          cid="$(docker compose ps -q sub2api)"
+          for i in $(seq 1 36); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
+            echo "health: $status ($i/36)"
+            [ "$status" = "healthy" ] && break
+            if [ "$i" = 36 ]; then
+              echo "::error::sub2api 未在 180s 内 healthy；回滚：.env 中 SUB2API_TAG=${prev_tag:-<旧tag>} 后 docker compose up -d"
+              docker compose logs --tail=100 sub2api
+              exit 1
+            fi
+            sleep 5
+          done
+          docker image prune -f >/dev/null || true
+          docker compose ps
+
+      - name: Cleanup docker credentials
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/docker-config"

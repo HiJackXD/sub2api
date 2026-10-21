@@ -1,14 +1,15 @@
 # =============================================================================
-# Sub2API Docker Compose Configuration
+# Sub2API Docker Compose —— fork 二开部署机版本
 # =============================================================================
-# Quick Start:
-#   1. Copy .env.example to .env and configure
-#   2. docker-compose up -d
-#   3. Check logs: docker-compose logs -f sub2api
-#   4. Access: http://localhost:8080
+# 基于上游 deploy/docker-compose.yml 改写：
+#   1. sub2api 镜像改为 GHCR（由 SUB2API_IMAGE / SUB2API_TAG 控制，CI 部署时会改写 .env 里的 SUB2API_TAG）
+#   2. 数据卷改为本地目录（与上游推荐的 docker-compose.local.yml 一致，便于备份/迁移）
+#   其余（环境变量、健康检查、postgres 调优参数、redis 配置）与上游保持一致。
 #
-# All configuration is done via environment variables.
-# No Setup Wizard needed - the system auto-initializes on first run.
+# 用法（部署机上，DEPLOY_PATH 目录内）：
+#   cp .env.example .env && chmod 600 .env   # 填好 POSTGRES_PASSWORD / JWT_SECRET / TOTP_ENCRYPTION_KEY 等
+#   mkdir -p data postgres_data redis_data
+#   docker compose pull && docker compose up -d
 # =============================================================================
 
 services:
@@ -16,7 +17,7 @@ services:
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ${SUB2API_IMAGE:-ghcr.io/CHANGE_ME_OWNER/sub2api}:${SUB2API_TAG:-latest}
     container_name: sub2api
     restart: unless-stopped
     security_opt:
@@ -28,8 +29,8 @@ services:
     ports:
       - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
     volumes:
-      # Data persistence (config.yaml will be auto-generated here)
-      - sub2api_data:/app/data
+      # 本地目录持久化（config.yaml 会自动生成在这里）
+      - ./data:/app/data
       # Optional: Mount custom config.yaml (uncomment and create the file first)
       # Copy config.example.yaml to config.yaml, modify it, then uncomment:
       # - ./config.yaml:/app/data/config.yaml
@@ -249,7 +250,7 @@ services:
       -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-4GB}
       -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./postgres_data:/var/lib/postgresql/data
     environment:
       # postgres:18-alpine 默认 PGDATA=/var/lib/postgresql/18/docker（位于镜像声明的匿名卷 /var/lib/postgresql 内）。
       # 若不显式设置 PGDATA，则即使挂载了 postgres_data 到 /var/lib/postgresql/data，数据也不会落盘到该命名卷，
@@ -286,7 +287,7 @@ services:
         soft: 100000
         hard: 100000
     volumes:
-      - redis_data:/data
+      - ./redis_data:/data
     command:
       - redis-server
       - --save
@@ -312,17 +313,6 @@ services:
       start_period: 5s
     # 注意：不暴露端口到宿主机，应用通过内部网络连接
     # 如需调试，可临时添加：ports: ["127.0.0.1:6379:6379"]
-# =============================================================================
-# Volumes
-# =============================================================================
-volumes:
-  sub2api_data:
-    driver: local
-  postgres_data:
-    driver: local
-  redis_data:
-    driver: local
-
 # =============================================================================
 # Networks
 # =============================================================================
