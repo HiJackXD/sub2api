@@ -1,3 +1,9 @@
+# DISABLED in this fork (filename is release.yml.disabled, so Actions will not run it).
+# Upstream release.yml pushes ghcr.io/<owner>/sub2api on v* tags (latest + semver)
+# and also publishes GitHub Releases. That clashes with
+# .github/workflows/build-deploy-selfhosted.yml, which owns the same GHCR tags.
+# Restore the original filename .github/workflows/release.yml to re-enable it,
+# and do not run both workflows against the same v* tags.
 name: Release
 
 on:
