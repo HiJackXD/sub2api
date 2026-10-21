@@ -141,7 +141,7 @@ docs/*
 !docs/COMPOSITE_GROUPS.md
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
-!docs/ci-deploy-selfhosted.md
+!docs/ci-build-image.md
 !docs/codex-credits.md
 !docs/legal/
 !docs/legal/*.md
