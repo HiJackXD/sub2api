@@ -1,3 +1,6 @@
+# DISABLED in this fork (filename is cla.yml.disabled, so Actions will not run it).
+# Upstream CLA assistant is not used here. This fork only runs .github/workflows/build-image.yml.
+# Restore the original filename cla.yml to re-enable it.
 name: "CLA Assistant"
 
 on:

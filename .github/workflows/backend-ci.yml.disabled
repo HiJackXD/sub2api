@@ -1,3 +1,6 @@
+# DISABLED in this fork (filename is backend-ci.yml.disabled, so Actions will not run it).
+# Upstream CI is turned off. This fork only runs .github/workflows/build-image.yml.
+# Restore the original filename backend-ci.yml to re-enable it.
 name: CI
 
 on:

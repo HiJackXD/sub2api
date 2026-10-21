@@ -1,3 +1,6 @@
+# DISABLED in this fork (filename is security-scan.yml.disabled, so Actions will not run it).
+# Upstream security scan is turned off. This fork only runs .github/workflows/build-image.yml.
+# Restore the original filename security-scan.yml to re-enable it.
 name: Security Scan
 
 on:

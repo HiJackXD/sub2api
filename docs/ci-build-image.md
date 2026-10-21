@@ -16,6 +16,9 @@ docker compose pull && docker compose up -d
 | `deploy/docker-compose.yml` | 部署机 compose。镜像是 `${SUB2API_IMAGE}:${SUB2API_TAG}`，卷是本地目录 `./data`、`./postgres_data`、`./redis_data` |
 | `deploy/.env.example` | 含 `SUB2API_IMAGE` / `SUB2API_TAG` 占位符，不含真实密钥 |
 | `.github/workflows/release.yml.disabled` | 上游 release workflow，已禁用。改回 `release.yml` 才会重新跑 |
+| `.github/workflows/backend-ci.yml.disabled` | 上游 CI，本 fork 已禁用 |
+| `.github/workflows/security-scan.yml.disabled` | 上游安全扫描，本 fork 已禁用 |
+| `.github/workflows/cla.yml.disabled` | 上游 CLA，本 fork 已禁用。改回 `.yml` 才会重新跑 |
 
 ## 流水线
 
@@ -81,8 +84,7 @@ docker compose pull && docker compose up -d
 ## 和其他 workflow 的关系
 
 - `release.yml.disabled`：上游会在 `v*` tag 上用 GoReleaser 往 `ghcr.io/<owner>/sub2api` 推 `latest` 和版本号，还会建 Release、改 VERSION、发 Telegram。和本 workflow 冲突，所以保持禁用。要恢复发版就改回文件名 `release.yml`，并且不要和 `build-image.yml` 同时响应同一个 `v*` tag。
-- `backend-ci.yml` / `security-scan.yml`：照常做 CI，本方案不依赖它们成功后才构建。
-- `cla.yml`：条件是 `github.repository == 'Wei-Shaw/sub2api'`，fork 里不会执行。
+- `backend-ci.yml.disabled`、`security-scan.yml.disabled`、`cla.yml.disabled`：本 fork 已改名禁用。Actions 只加载 `.yml` / `.yaml`，所以上游 CI、安全扫描和 CLA 都不会跑。当前唯一启用的 workflow 是 `build-image.yml`。要恢复其中某一个，把对应文件名改回 `.yml`。
 
 ## 二开注意
 
