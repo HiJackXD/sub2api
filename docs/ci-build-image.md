@@ -6,7 +6,7 @@ CI 只负责把镜像推到 `ghcr.io/<owner 小写>/sub2api`。部署机在内�
 docker compose pull && docker compose up -d
 ```
 
-上游 `release.yml` 已改名为 `.github/workflows/release.yml.disabled`，避免 `v*` tag 时两边同时往同一个 GHCR 仓库推 `latest` 和版本号。不要再加 `build-deploy.yml` 或自托管部署 workflow。
+`.github/workflows/` 里只保留 `build-image.yml`。上游的 `release.yml`、`backend-ci.yml`、`security-scan.yml`、`cla.yml` 已从本 fork 删除：`release.yml` 会在 `v*` tag 上往同一个 GHCR 仓库推 `latest` 和版本号，和这条流水线冲突。不要再加 `build-deploy.yml` 或自托管部署 workflow。
 
 ## 文件
 
@@ -15,7 +15,6 @@ docker compose pull && docker compose up -d
 | `.github/workflows/build-image.yml` | push `main` / `v*` tag / 手动触发 → buildx 构建并推送 GHCR |
 | `deploy/docker-compose.yml` | 部署机 compose。镜像是 `${SUB2API_IMAGE}:${SUB2API_TAG}`，卷是本地目录 `./data`、`./postgres_data`、`./redis_data` |
 | `deploy/.env.example` | 含 `SUB2API_IMAGE` / `SUB2API_TAG` 占位符，不含真实密钥 |
-| `.github/workflows/release.yml.disabled` | 上游 release workflow，已禁用。改回 `release.yml` 才会重新跑 |
 
 ## 流水线
 
@@ -80,9 +79,7 @@ docker compose pull && docker compose up -d
 
 ## 和其他 workflow 的关系
 
-- `release.yml.disabled`：上游会在 `v*` tag 上用 GoReleaser 往 `ghcr.io/<owner>/sub2api` 推 `latest` 和版本号，还会建 Release、改 VERSION、发 Telegram。和本 workflow 冲突，所以保持禁用。要恢复发版就改回文件名 `release.yml`，并且不要和 `build-image.yml` 同时响应同一个 `v*` tag。
-- `backend-ci.yml` / `security-scan.yml`：照常做 CI，本方案不依赖它们成功后才构建。
-- `cla.yml`：条件是 `github.repository == 'Wei-Shaw/sub2api'`，fork 里不会执行。
+本 fork 的 `.github/workflows/` 只有 `build-image.yml`。上游的 `release.yml`、`backend-ci.yml`、`security-scan.yml`、`cla.yml` 已删除，不会再跑 CI、安全扫描、CLA 或 GoReleaser 发版。需要那些流程时从上游仓库把对应文件加回来；不要和 `build-image.yml` 同时响应同一个 `v*` tag 去推 `ghcr.io/<owner>/sub2api`。
 
 ## 二开注意
 
