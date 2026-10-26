@@ -270,6 +270,12 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				reqLog.Info("grok_media.account_select_aborted_client_disconnected", zap.Error(err))
 				return
 			}
+			if len(failedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.errorResponse(c, status, errType, message)
+					return
+				}
+			}
 			if boundLookupAccountID > 0 && errors.Is(err, service.ErrNoAvailableAccounts) {
 				h.errorResponse(c, http.StatusNotFound, "not_found_error", "Video request not found")
 				return
@@ -300,6 +306,10 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.errorResponse(c, status, errType, message)
+				return
+			}
 			if endpoint.IsGenerationRequest() {
 				markOpsRoutingCapacityLimited(c)
 				h.errorResponse(c, http.StatusServiceUnavailable, noAccountCode, noAccountMessage)

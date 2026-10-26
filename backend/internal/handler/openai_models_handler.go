@@ -30,6 +30,10 @@ func (h *GatewayHandler) pinnedOpenAIModels(c *gin.Context, group *service.Group
 		return
 	}
 	if err != nil {
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			writeOpenAIModelsError(c, status, errType, message)
+			return
+		}
 		if errors.Is(err, service.ErrNoPinnedCodexModelsAccounts) {
 			writeOpenAIModelsError(c, http.StatusServiceUnavailable, "upstream_error", "No available OpenAI model discovery accounts")
 			return

@@ -567,6 +567,63 @@ func TestBuildSchedulerMetadataAccount_KeepsQuotaStateForCachedAccounts(t *testi
 	}
 }
 
+func TestBuildSchedulerMetadataAccount_KeepsUserAgentFilter(t *testing.T) {
+	account := service.Account{
+		ID:          91,
+		Platform:    service.PlatformAnthropic,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Extra: map[string]any{
+			service.UAFilterExtraModeKey:     "allow",
+			service.UAFilterExtraPatternsKey: []string{"claude-cli/"},
+			"unused_large_field":             "drop-me",
+		},
+	}
+
+	got := buildSchedulerMetadataAccount(account)
+
+	require.Equal(t, "allow", got.Extra[service.UAFilterExtraModeKey])
+	require.Equal(t, []string{"claude-cli/"}, got.Extra[service.UAFilterExtraPatternsKey])
+	require.Nil(t, got.Extra["unused_large_field"])
+	require.False(t, got.AllowsInboundUserAgent("python-requests/2.32"))
+	require.True(t, got.AllowsInboundUserAgent("claude-cli/2.1.1"))
+}
+
+func TestGetSnapshot_KeepsUserAgentFilterExtra(t *testing.T) {
+	account := service.Account{
+		ID:          46750,
+		Platform:    service.PlatformAnthropic,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Extra: map[string]any{
+			service.UAFilterExtraModeKey:     "allow",
+			service.UAFilterExtraPatternsKey: []string{"claude-cli/"},
+			"unrelated":                      "drop me",
+		},
+	}
+	cache := newSchedulerCacheUnit(t)
+	ctx := context.Background()
+	bucket := service.SchedulerBucket{GroupID: 46750, Platform: service.PlatformAnthropic, Mode: service.SchedulerModeSingle}
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{account}))
+
+	snapshot, hit, err := cache.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Len(t, snapshot, 1)
+	cached := snapshot[0]
+	require.Equal(t, map[string]any{
+		service.UAFilterExtraModeKey:     "allow",
+		service.UAFilterExtraPatternsKey: []any{"claude-cli/"},
+	}, cached.Extra)
+	require.NotContains(t, cached.Extra, "unrelated")
+	require.False(t, cached.AllowsInboundUserAgent("python-requests/2.32"))
+	require.True(t, cached.AllowsInboundUserAgent("claude-cli/2.1.1"))
+}
+
 func TestBuildSchedulerMetadataAccount_KeepsModelRateLimits(t *testing.T) {
 	account := service.Account{
 		ID:       90,

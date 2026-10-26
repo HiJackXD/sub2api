@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -396,6 +397,9 @@ func (s *OpenAIGatewayService) fetchScheduledOpenAIModels(ctx context.Context, g
 		if err != nil {
 			if lastErr != nil {
 				return nil, lastErr
+			}
+			if errors.Is(err, ErrUserAgentNotAllowed) {
+				return nil, err
 			}
 			return nil, ErrNoPinnedCodexModelsAccounts
 		}

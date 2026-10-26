@@ -33,4 +33,20 @@ describe('CreateAccountModal Grok account types', () => {
   it('hides Grok password authorize option in the create flow', () => {
     expect(source).toContain(':show-email-password-option="false"')
   })
+
+  it('passes the user-agent filter extra on Grok SSO import', () => {
+    const start = source.indexOf('const handleGrokImportSSO')
+    const end = source.indexOf('const handleGrokAuthorizePassword')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const fn = source.slice(start, end)
+    const guard = fn.indexOf('withCreateAccountExtra(undefined)')
+    const stop = fn.indexOf('if (createExtra === null)')
+    const call = fn.indexOf('adminAPI.grok.createFromSSO({')
+    expect(guard).toBeGreaterThan(-1)
+    expect(stop).toBeGreaterThan(guard)
+    expect(call).toBeGreaterThan(stop)
+    const callBody = fn.slice(call, fn.indexOf('})', call))
+    expect(callBody).toContain('extra: createExtra')
+  })
 })

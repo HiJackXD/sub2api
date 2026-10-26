@@ -203,6 +203,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+					return
+				}
 				cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
 				cls = classifySelectionFailureError(err, cls)
 				if !cls.ModelNotFound {
@@ -220,6 +224,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)

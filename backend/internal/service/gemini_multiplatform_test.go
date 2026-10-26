@@ -147,8 +147,19 @@ func (m *mockAccountRepoForGemini) ListSchedulableUngroupedByPlatform(ctx contex
 func (m *mockAccountRepoForGemini) ListSchedulableUngroupedByPlatforms(ctx context.Context, platforms []string) ([]Account, error) {
 	return m.ListSchedulableByPlatforms(ctx, platforms)
 }
-func (m *mockAccountRepoForGemini) ListModelAvailabilityCandidates(ctx context.Context, _ *int64, platforms []string, _ bool) ([]Account, error) {
-	return m.ListSchedulableByPlatforms(ctx, platforms)
+func (m *mockAccountRepoForGemini) ListModelAvailabilityCandidates(_ context.Context, _ *int64, platforms []string, _ bool) ([]Account, error) {
+	platformSet := make(map[string]struct{}, len(platforms))
+	for _, platform := range platforms {
+		platformSet[platform] = struct{}{}
+	}
+	result := make([]Account, 0, len(m.accounts))
+	for _, acc := range m.accounts {
+		if _, ok := platformSet[acc.Platform]; !ok || acc.Status != StatusActive || !acc.Schedulable {
+			continue
+		}
+		result = append(result, acc)
+	}
+	return result, nil
 }
 func (m *mockAccountRepoForGemini) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	return nil

@@ -962,6 +962,9 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 
 // BindStickySession sets session -> account binding with standard TTL.
 func (s *GatewayService) BindStickySession(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
+	if stickyBindingClearedByUserAgentRequest(ctx) {
+		return nil
+	}
 	if sessionHash == "" || accountID <= 0 || s.cache == nil {
 		return nil
 	}
@@ -973,6 +976,9 @@ func (s *GatewayService) BindStickySession(ctx context.Context, groupID *int64, 
 // only after the terminal post-slot check, otherwise a rejected candidate could
 // overwrite a healthy pre-existing sticky binding.
 func (s *GatewayService) bindGatewayStickySessionDuringSelection(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
+	if stickyBindingClearedByUserAgentRequest(ctx) {
+		return nil
+	}
 	if gatewayProfitControlGateActive(ctx) {
 		return nil
 	}
@@ -986,6 +992,9 @@ func (s *GatewayService) bindGatewayStickySessionDuringSelection(ctx context.Con
 // account remains bound and automatically becomes eligible again if its
 // account rate recovers.
 func (s *GatewayService) BindStickySessionAfterProfitAdmission(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
+	if stickyBindingClearedByUserAgentRequest(ctx) {
+		return nil
+	}
 	if sessionHash == "" || accountID <= 0 || s.cache == nil {
 		return nil
 	}

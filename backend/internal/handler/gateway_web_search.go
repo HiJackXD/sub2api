@@ -156,6 +156,13 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		)
 		if selectErr != nil {
 			if attempt == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
+					c.JSON(status, gin.H{"error": gin.H{
+						"type":    errType,
+						"message": message,
+					}})
+					return
+				}
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
 					"type":    "scheduling_error",
 					"message": selectErr.Error(),

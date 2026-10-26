@@ -697,6 +697,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+					return
+				}
 				if legacyCompact && errors.Is(err, service.ErrNoAvailableCompactAccounts) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available accounts support /responses/compact", streamStarted)
@@ -718,6 +722,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, requestPlatform)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
@@ -1330,6 +1338,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
+					return
+				}
 				if err != nil {
 					cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 					if !cls.ModelNotFound {
@@ -1348,6 +1360,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
@@ -2712,6 +2728,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var wsUpstreamDialed bool
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	wsAttemptMessage := append([]byte(nil), firstMessage...)
 	waitForWSSameAccountRetry := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
@@ -2816,6 +2833,16 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			// The socket is already accepted. Selection is still before the
+			// upstream dial, so this sentinel can be an error frame. A later
+			// sentinel after a dial keeps the generic close.
+			if !wsUpstreamDialed {
+				if _, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					writeOpenAIUserAgentNotAllowedWSError(ctx, wsConn, errType, message)
+					closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, message)
+					return
+				}
+			}
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(c, wsConn, lastFailoverErr)
 			} else {
@@ -3215,6 +3242,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			defer cleanupPreempt()
 		}
 
+		wsUpstreamDialed = true
 		for {
 			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, hooks)
 			if err == nil {
@@ -3966,6 +3994,28 @@ func blockedModelAllowlistCandidate(group *service.Group, candidates []string) s
 		}
 	}
 	return ""
+}
+
+func writeOpenAIUserAgentNotAllowedWSError(ctx context.Context, conn *coderws.Conn, errType, message string) {
+	if conn == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload, err := json.Marshal(gin.H{
+		"type": "error",
+		"error": gin.H{
+			"type":    errType,
+			"message": message,
+		},
+	})
+	if err != nil {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = conn.Write(writeCtx, coderws.MessageText, payload)
 }
 
 func closeOpenAIClientWS(conn *coderws.Conn, status coderws.StatusCode, reason string) {

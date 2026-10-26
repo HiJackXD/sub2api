@@ -81,4 +81,12 @@ const (
 
 	// ClaudeCodeVersion stores the extracted Claude Code version from User-Agent (e.g. "2.1.22")
 	ClaudeCodeVersion Key = "ctx_claude_code_version"
+
+	// InboundUserAgent 标记用户请求的原始 User-Agent。键不存在表示内部调用。
+	InboundUserAgent Key = "ctx_inbound_user_agent"
+
+	// StickyBindingClearedByUserAgent 持有 *bool。API Key 认证把它装到请求 context 上。
+	// 选择器在本请求因 User-Agent 规则删除粘性绑定时把该值设为 true。
+	// 必须是指针：调度过程中派生的子 context 仍能改到处理器所持的同一个值。
+	StickyBindingClearedByUserAgent Key = "ctx_sticky_binding_cleared_by_user_agent"
 )

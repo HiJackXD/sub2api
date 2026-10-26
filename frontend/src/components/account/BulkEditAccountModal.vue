@@ -666,6 +666,13 @@
         </div>
       </div>
 
+      <UserAgentFilterFields
+        bulk
+        :model-value="uaFilter"
+        :invalid="uaFilterInvalid"
+        @update:model-value="onUAFilterUpdate"
+      />
+
       <!-- Proxy -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -1499,6 +1506,8 @@ import {
   getPresetMappingsByPlatform
 } from '@/composables/useModelWhitelist'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
+import UserAgentFilterFields from '@/components/account/UserAgentFilterFields.vue'
+import { normalizeUAFilter, type UAFilterMode } from '@/components/account/uaFilter'
 import {
   buildHeaderOverridesObject,
   isHeaderOverrideCapable,
@@ -1673,6 +1682,12 @@ const enableOpenAICompactModelMapping = ref(false)
 const enableRpmLimit = ref(false)
 
 // State - field values
+const uaFilter = ref<{ mode: UAFilterMode; patterns: string[] }>({ mode: 'unchanged', patterns: [] })
+const uaFilterInvalid = ref(false)
+const onUAFilterUpdate = (value: { mode: UAFilterMode; patterns: string[] }) => {
+  uaFilter.value = { mode: value.mode, patterns: [...value.patterns] }
+  uaFilterInvalid.value = false
+}
 const submitting = ref(false)
 const showMixedChannelWarning = ref(false)
 const mixedChannelWarningMessage = ref('')
@@ -2152,6 +2167,24 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     updates.credentials = credentials
   }
 
+  if (uaFilter.value.mode !== 'unchanged') {
+    const result = normalizeUAFilter(uaFilter.value.mode, uaFilter.value.patterns)
+    if (!result.ok) {
+      uaFilterInvalid.value = true
+      return null
+    }
+    const extra = ensureExtra()
+    if (result.mode === 'off') {
+      // Bulk extra is a JSONB merge. Omitting the keys would leave an existing
+      // filter in place, so mode off is sent and the server clears both keys.
+      extra.ua_filter_mode = 'off'
+      delete extra.ua_filter_patterns
+    } else if (result.mode === 'allow' || result.mode === 'block') {
+      extra.ua_filter_mode = result.mode
+      extra.ua_filter_patterns = result.patterns
+    }
+  }
+
   return Object.keys(updates).length > 0 ? updates : null
 }
 
@@ -2228,7 +2261,8 @@ const handleSubmit = async () => {
     enableOpenAICompactMode.value ||
     enableOpenAICompactModelMapping.value ||
     enableRpmLimit.value ||
-    userMsgQueueMode.value !== null
+    userMsgQueueMode.value !== null ||
+    uaFilter.value.mode !== 'unchanged'
 
   if (!hasAnyFieldEnabled) {
     appStore.showError(t('admin.accounts.bulkEdit.noFieldsSelected'))
@@ -2259,7 +2293,24 @@ const handleSubmit = async () => {
     }
   }
 
+  if (uaFilter.value.mode === 'allow' || uaFilter.value.mode === 'block') {
+    const result = normalizeUAFilter(uaFilter.value.mode, uaFilter.value.patterns)
+    if (!result.ok) {
+      uaFilterInvalid.value = true
+      appStore.showError(
+        uaFilter.value.patterns.some((item) => item.trim() !== '')
+          ? t('admin.accounts.uaFilter.invalidPattern')
+          : t('admin.accounts.uaFilter.emptyList')
+      )
+      return
+    }
+    uaFilterInvalid.value = false
+  }
+
   const built = buildUpdatePayload()
+  if (uaFilterInvalid.value) {
+    return
+  }
   if (!built) {
     appStore.showError(t('admin.accounts.bulkEdit.noFieldsSelected'))
     return
@@ -2351,6 +2402,10 @@ const handleMixedChannelCancel = () => {
 watch(
   () => props.show,
   (newShow) => {
+    if (newShow) {
+      uaFilter.value = { mode: 'unchanged', patterns: [] }
+      uaFilterInvalid.value = false
+    }
     if (!newShow) {
       // Reset all enable flags
       enableBaseUrl.value = false
@@ -2415,6 +2470,8 @@ watch(
       bulkRpmStrategy.value = 'tiered'
       bulkRpmStickyBuffer.value = null
       userMsgQueueMode.value = null
+      uaFilter.value = { mode: 'unchanged', patterns: [] }
+      uaFilterInvalid.value = false
 
       // Reset mixed channel warning state
       showMixedChannelWarning.value = false

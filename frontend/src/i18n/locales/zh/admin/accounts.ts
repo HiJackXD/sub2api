@@ -755,6 +755,25 @@ export default {
         sub2apiNote: '对应对方用量明细的请求ID列',
         official: '{platform} 官方 API'
       },
+      uaFilter: {
+        title: 'User-Agent 过滤',
+        hint: '按入站 User-Agent 匹配。关闭表示不过滤。允许表示仅当命中一条规则时使用该账号。拒绝表示命中一条规则时跳过该账号。',
+        mode: '模式',
+        off: '关闭',
+        allow: '允许',
+        block: '拒绝',
+        unchanged: '不修改',
+        presetClaudeCode: 'Claude Code',
+        presetCodex: 'Codex',
+        presetOpenCode: 'OpenCode',
+        customPattern: '自定义匹配',
+        customPatternPlaceholder: '要匹配的子串',
+        addPattern: '添加',
+        patterns: '匹配规则',
+        removePattern: '移除',
+        emptyList: '允许或拒绝模式至少需要一条匹配规则。',
+        invalidPattern: '每条规则须为 3–128 个字符且不能包含控制字符，最多 50 条。'
+      },
       // OpenAI specific hints
       openai: {
         baseUrlHint: '留空使用官方 OpenAI API',

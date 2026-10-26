@@ -136,6 +136,10 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 				return
 			}
 			if len(fs.FailedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.errorResponse(c, status, errType, message)
+					return
+				}
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, model, model, service.PlatformTypeSafe)
 				cls = classifySelectionFailureError(err, cls)
 				if !cls.ModelNotFound {

@@ -2732,18 +2732,27 @@ func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now ti
 
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	updates = stripCodexFingerprintSeedFromExtraUpdate(updates)
-	if len(updates) == 0 {
+	clearUserAgentFilter := false
+	if flag, ok := updates[service.UAFilterClearOnMergeKey].(bool); ok && flag {
+		clearUserAgentFilter = true
+		delete(updates, service.UAFilterClearOnMergeKey)
+	}
+	if len(updates) == 0 && !clearUserAgentFilter {
 		return nil
 	}
 
 	// 使用 JSONB 合并操作实现原子更新，避免读-改-写的并发丢失更新问题
-	payload, err := json.Marshal(updates)
-	if err != nil {
-		return err
+	var payload []byte
+	var err error
+	if len(updates) > 0 {
+		payload, err = json.Marshal(updates)
+		if err != nil {
+			return err
+		}
 	}
 
 	clearProbeSnapshot := upstreamBillingProbeExplicitlyDisabled(updates) || upstreamBillingProbeSnapshotClearRequested(updates)
-	durableSchedulerChange := shouldEnqueueSchedulerOutboxForExtraUpdates(updates) || clearProbeSnapshot
+	durableSchedulerChange := shouldEnqueueSchedulerOutboxForExtraUpdates(updates) || clearProbeSnapshot || clearUserAgentFilter
 	baseCtx := ctx
 	contextTx := dbent.TxFromContext(ctx)
 	client := clientFromContext(ctx, r.client)
@@ -2760,18 +2769,33 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 			client = tx.Client()
 		}
 	}
-	extraExpression := "COALESCE(extra, '{}'::jsonb) || $1::jsonb"
+	extraExpression := "COALESCE(extra, '{}'::jsonb)"
+	if len(updates) > 0 {
+		extraExpression += " || $1::jsonb"
+	}
 	if clearProbeSnapshot {
 		extraExpression = "(" + extraExpression + ") - 'upstream_billing_probe'"
+	}
+	if clearUserAgentFilter {
+		extraExpression = "(" + extraExpression + ") - 'ua_filter_mode' - 'ua_filter_patterns'"
 	}
 	if service.ShouldEnsureCodexFingerprintSeedForExtraUpdates(updates) {
 		extraExpression = ensureCodexFingerprintSeedSQL(extraExpression)
 	}
-	result, err := client.ExecContext(
-		ctx,
-		"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL",
-		string(payload), id,
-	)
+	var result sql.Result
+	if len(updates) > 0 {
+		result, err = client.ExecContext(
+			ctx,
+			"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL",
+			string(payload), id,
+		)
+	} else {
+		result, err = client.ExecContext(
+			ctx,
+			"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+			id,
+		)
+	}
 
 	if err != nil {
 		return err
@@ -3128,7 +3152,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 				" AND COALESCE(btrim("+credentialPlaceholder+"::jsonb ->> 'account_mode') <> 'zen', true) IS NOT TRUE")
 	}
 
-	if len(updates.Extra) > 0 || len(ollamaGroupIdentityChanges) > 0 || len(opencodeGroupIdentityChanges) > 0 || ollamaProxyIdentityChanged != "" || updates.EnsureCodexFingerprintSeed {
+	if len(updates.Extra) > 0 || len(ollamaGroupIdentityChanges) > 0 || len(opencodeGroupIdentityChanges) > 0 || ollamaProxyIdentityChanged != "" || updates.EnsureCodexFingerprintSeed || updates.ClearUserAgentFilter {
 		extraExpression := "COALESCE(extra, '{}'::jsonb)"
 		if len(updates.Extra) > 0 {
 			payload, err := json.Marshal(updates.Extra)
@@ -3144,6 +3168,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 			if ollamaCloudUsageSnapshotClearRequested(updates.Extra) {
 				extraExpression = "(" + extraExpression + ") - 'ollama_cloud_usage_snapshot'"
 			}
+		}
+		if updates.ClearUserAgentFilter {
+			extraExpression = "(" + extraExpression + ") - 'ua_filter_mode' - 'ua_filter_patterns'"
 		}
 		eligibleAccount := "platform IN (" + ollamaCloudUsagePlatformsSQL + ") AND type = 'apikey'"
 		groupIdentityChanged := ""

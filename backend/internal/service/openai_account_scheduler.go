@@ -467,6 +467,11 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		if escapedSticky {
 			req.PreserveStickyBinding = true
 		}
+	} else if s.service != nil && req.StickyAccountID > 0 {
+		account, loadErr := s.service.getSchedulableAccount(ctx, req.StickyAccountID)
+		if loadErr == nil {
+			_ = s.service.clearStickySessionForUserAgent(ctx, req.GroupID, strings.TrimSpace(req.SessionHash), account, req.RequestedModel, req.RequireCompact, req.PreserveStickyBinding)
+		}
 	}
 
 	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req)
@@ -526,6 +531,9 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	account, err := s.service.getSchedulableAccount(ctx, accountID)
 	if err != nil || account == nil {
 		clearBinding()
+		return nil, false, nil
+	}
+	if s.service.clearStickySessionForUserAgent(ctx, req.GroupID, sessionHash, account, req.RequestedModel, req.RequireCompact, req.PreserveStickyBinding) {
 		return nil, false, nil
 	}
 	if shouldClearStickySession(account, req.RequestedModel) || account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() || !account.IsSchedulable() {
@@ -1400,7 +1408,15 @@ func (s openAISelectionFilterStats) summary(extra string) string {
 func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
-) (*AccountSelectionResult, int, int, float64, error) {
+) (_ *AccountSelectionResult, _ int, _ int, _ float64, err error) {
+	ctx, uaStats := withUAFilterStats(ctx)
+	defer func() {
+		if err != nil && s != nil && s.service != nil {
+			err = s.service.confirmOpenAIUserAgentDenial(ctx, uaStats, err, req.GroupID, req.Platform, req.RequestedModel, req.ExcludedIDs, req.RequireCompact, req.RequiredCapability, openAIUserAgentConfirmAdvanced)
+		} else if err != nil {
+			err = uaStats.errorOr(err)
+		}
+	}()
 	budget := newOpenAISelectionProbeBudget()
 	accounts, err := s.service.listSchedulableAccounts(ctx, req.GroupID, req.Platform)
 	if err != nil {
@@ -1449,16 +1465,8 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 				continue
 			}
 		}
-		if !account.IsSchedulable() {
-			filterStats.exclude("not_schedulable")
-			continue
-		}
 		if account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() {
 			filterStats.exclude("platform_mismatch")
-			continue
-		}
-		if s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
-			filterStats.exclude("runtime_blocked")
 			continue
 		}
 		// require_privacy_set is a group-scoped eligibility gate. Do not mutate the
@@ -1470,6 +1478,12 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 		if compatible, reason := s.isAccountRequestCompatibleReason(ctx, account, req); !compatible {
 			filterStats.exclude(reason)
+			continue
+		}
+		// Rate limit, overload, and temporary unschedulability run after the
+		// User-Agent rule. A model or platform miss already continued above.
+		if !account.IsSchedulable() {
+			filterStats.exclude("not_schedulable")
 			continue
 		}
 		if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
@@ -1784,26 +1798,6 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if req.RequirePrivacySet && !account.IsPrivacySet() {
 		return false, "privacy_not_set"
 	}
-	if s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
-		return false, "runtime_blocked"
-	}
-	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(ctx, account) {
-		return false, "proxy_stream_quarantined"
-	}
-	// Quota auto-pause must be evaluated during the initial filter too. Without it the
-	// TopK candidate pool can be filled with paused accounts and the later fresh/DB
-	// rechecks won't reach healthy accounts that fell outside TopK — manifesting as
-	// "no available accounts" even though healthy ones exist.
-	if paused, decision := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {
-		if decision.reason != "" {
-			return false, decision.reason
-		}
-		reason := "quota_auto_pause"
-		if decision.window != "" {
-			reason += "_" + decision.window
-		}
-		return false, reason
-	}
 	// 母账号健康联动：影子账号的凭据来自母账号，母账号不可调度时影子也不应被选中。
 	// Parent-health gate: shadow borrows the parent's credentials; an unschedulable
 	// parent must block the shadow across all scheduler paths.
@@ -1814,6 +1808,35 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}
 	if req.RequestedModel != "" && !supportsOpenAIRequestModel(account, req.RequestedModel, req.RequireCompact) {
 		return false, "model_not_supported"
+	}
+	// The User-Agent candidate set is accounts already accepted by group, platform,
+	// and model. Count that decision before transient unschedulability. A model
+	// miss stays model_not_supported and must not increment uaFilterStats.
+	if userAgentBlocksCandidate(ctx, account, nil) {
+		return false, "user_agent"
+	}
+	// These exclusions stay inside the initial filter so a temporarily
+	// unschedulable account cannot fill TopK. They run after the User-Agent
+	// rule so a passing account is still a pass, and an all-fail set is still
+	// ErrUserAgentNotAllowed.
+	if reason := openAIModelRateLimitFailureReason(ctx, account, req.RequestedModel); reason != "" {
+		return false, reason
+	}
+	if s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
+		return false, "runtime_blocked"
+	}
+	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(ctx, account) {
+		return false, "proxy_stream_quarantined"
+	}
+	if paused, decision := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {
+		if decision.reason != "" {
+			return false, decision.reason
+		}
+		reason := "quota_auto_pause"
+		if decision.window != "" {
+			reason += "_" + decision.window
+		}
+		return false, reason
 	}
 	if req.GroupID != nil && s != nil && s.service != nil &&
 		s.service.needsUpstreamChannelRestrictionCheck(ctx, req.GroupID) &&
@@ -2310,6 +2333,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	ctx = WithStickyBindingClearedByUserAgent(ctx)
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
 	// 分组利润控制：唯一文本调度入口的防御性装门。handler 文本

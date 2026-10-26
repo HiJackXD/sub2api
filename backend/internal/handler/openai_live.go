@@ -178,6 +178,10 @@ func liveCallIdentity(
 }
 
 func (h *OpenAIGatewayHandler) writeLiveCreateError(c *gin.Context, err error) {
+	if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+		h.errorResponse(c, status, errType, message)
+		return
+	}
 	switch {
 	case errors.Is(err, service.ErrLiveConcurrencyFull):
 		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Live concurrency limit reached")

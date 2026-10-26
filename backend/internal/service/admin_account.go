@@ -320,6 +320,10 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	if err != nil {
 		return nil, fmt.Errorf("normalize duplicate account extra: %w", err)
 	}
+	accountExtra, _, err = NormalizeUserAgentFilterExtra(accountExtra)
+	if err != nil {
+		return nil, err
+	}
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
 		return nil, err
 	}
@@ -494,6 +498,10 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	accountExtra, _, err = NormalizeUserAgentFilterExtra(accountExtra)
+	if err != nil {
+		return nil, err
+	}
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -601,6 +609,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 		if err := ValidateUpstreamRequestIDHeaderExtra(normalizedExtra); err != nil {
+			return nil, err
+		}
+		normalizedExtra, _, err = NormalizeUserAgentFilterExtra(normalizedExtra)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -936,6 +948,17 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, OllamaCloudUsageSnapshotExtraKey)
 	delete(updates, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(updates, OpenCodeGoUsageSnapshotExtraKey)
+	normalized, clearUAFilter, err := NormalizeUserAgentFilterExtra(updates)
+	if err != nil {
+		return err
+	}
+	updates = normalized
+	if clearUAFilter {
+		if updates == nil {
+			updates = map[string]any{}
+		}
+		updates[UAFilterClearOnMergeKey] = true
+	}
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -965,6 +988,11 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	delete(input.Extra, OllamaCloudUsageSnapshotExtraKey)
 	delete(input.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(input.Extra, OpenCodeGoUsageSnapshotExtraKey)
+	normalized, clearUAFilter, err := NormalizeUserAgentFilterExtra(input.Extra)
+	if err != nil {
+		return nil, err
+	}
+	input.Extra = normalized
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)
@@ -1117,6 +1145,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		Extra:                      input.Extra,
 		ProbeEnabled:               input.ProbeEnabled,
 		EnsureCodexFingerprintSeed: ShouldEnsureCodexFingerprintSeedForExtraUpdates(input.Extra),
+		ClearUserAgentFilter:       clearUAFilter,
 	}
 	if input.ProbeEnabled != nil {
 		if repoUpdates.Extra == nil {

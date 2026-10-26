@@ -165,6 +165,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		}
 		ctx := context.WithValue(c.Request.Context(), ctxkey.UserID, apiKey.User.ID)
 		c.Request = c.Request.WithContext(ctx)
+		setInboundUserAgent(c)
 		billingInfoRequest := c.Request.URL.Path == "/v1/sub2api/billing"
 		// Async image task polling only reads data that already belongs to the
 		// authenticated key and must remain available after the completed
@@ -285,6 +286,14 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 
 		c.Next()
 	}
+}
+
+func setInboundUserAgent(c *gin.Context) {
+	ctx := service.WithInboundUserAgent(c.Request.Context(), c.GetHeader("User-Agent"))
+	// Pointer so a child context created during selection still updates the
+	// value later binds observe on this request context.
+	ctx = service.WithStickyBindingClearedByUserAgent(ctx)
+	c.Request = c.Request.WithContext(ctx)
 }
 
 func apiKeyHeadersTooLarge(c *gin.Context) bool {

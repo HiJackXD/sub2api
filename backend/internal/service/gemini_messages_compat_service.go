@@ -115,6 +115,10 @@ func (s *GeminiMessagesCompatService) SelectAccountForModel(ctx context.Context,
 }
 
 func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
+	// Reuse the middleware pointer when it is already installed. A User-Agent
+	// sticky clear sets that pointer so this request does not store a replacement.
+	ctx = WithStickyBindingClearedByUserAgent(ctx)
+
 	// 1. 确定目标平台和调度模式
 	// Determine target platform and scheduling mode
 	platform, useMixedScheduling, hasForcePlatform, err := s.resolvePlatformAndSchedulingMode(ctx, groupID)
@@ -132,12 +136,14 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 
 	// 3. 查询可调度账户（强制平台模式：优先按分组查找，找不到再查全部）
 	// Query schedulable accounts (force platform mode: try group first, fallback to all)
-	accounts, err := s.listSchedulableAccountsOnce(ctx, groupID, platform, hasForcePlatform)
+	queryGroupID := groupID
+	accounts, err := s.listSchedulableAccountsOnce(ctx, queryGroupID, platform, hasForcePlatform)
 	if err != nil {
 		return nil, fmt.Errorf("query accounts failed: %w", err)
 	}
 	// 强制平台模式下，分组中找不到账户时回退查询全部
 	if len(accounts) == 0 && groupID != nil && hasForcePlatform {
+		queryGroupID = nil
 		accounts, err = s.listSchedulableAccountsOnce(ctx, nil, platform, hasForcePlatform)
 		if err != nil {
 			return nil, fmt.Errorf("query accounts failed: %w", err)
@@ -146,7 +152,13 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 
 	// 4. 按优先级 + LRU 选择最佳账号
 	// Select best account by priority + LRU
-	selected := s.selectBestGeminiAccount(ctx, accounts, requestedModel, excludedIDs, platform, useMixedScheduling)
+	selected, err := s.selectBestGeminiAccount(ctx, accounts, requestedModel, excludedIDs, platform, useMixedScheduling)
+	if errors.Is(err, ErrUserAgentNotAllowed) && s.persistentGeminiCandidateAllows(ctx, queryGroupID, platform, requestedModel, excludedIDs, useMixedScheduling) {
+		selected, err = nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 
 	if selected == nil {
 		if requestedModel != "" {
@@ -156,8 +168,8 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 	}
 
 	// 5. 设置粘性会话绑定
-	// Set sticky session binding
-	if sessionHash != "" {
+	// Set sticky session binding. A User-Agent clear on this request leaves the key unset.
+	if sessionHash != "" && !stickyBindingClearedByUserAgentRequest(ctx) {
 		_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), cacheKey, selected.ID, geminiStickySessionTTL)
 	}
 
@@ -196,10 +208,21 @@ func (s *GeminiMessagesCompatService) resolvePlatformAndSchedulingMode(ctx conte
 }
 
 // tryStickySessionHit 尝试从粘性会话获取账号。
-// 如果命中且账号可用则返回账号；如果账号不可用则清理会话并返回 nil。
+// 命中且通过平台、模型、User-Agent 和暂时可调度检查时返回账号。
+// 账号已不可调度时清理会话。平台和模型仍匹配且 User-Agent 未通过时，标记本请求不要写入替代账号。
+// User-Agent 允许时不标记，回退账号仍会绑定。
+// 平台或模型不匹配、以及可调度账号的限流或配额未通过时保留绑定。
+// 可调度账号的 User-Agent 未通过时删除绑定，并标记本请求不要写入替代账号。
 //
-// tryStickySessionHit attempts to get account from sticky session.
-// Returns account if hit and usable; clears session and returns nil if account unavailable.
+// tryStickySessionHit attempts to get an account from the sticky session.
+// It returns the account when platform, model, User-Agent, and transient checks pass.
+// An already unschedulable account clears the session. When that account still
+// matches platform and model and fails the User-Agent rule, this request does
+// not store the replacement. An allowed User-Agent leaves the pointer unset, so
+// the fallback is stored. A platform or model miss, and a rate-limit or quota
+// miss on a schedulable account, keep the binding. A User-Agent miss on a
+// schedulable account deletes the binding and marks this request so the
+// replacement account is not stored.
 func (s *GeminiMessagesCompatService) tryStickySessionHit(
 	ctx context.Context,
 	groupID *int64,
@@ -226,16 +249,45 @@ func (s *GeminiMessagesCompatService) tryStickySessionHit(
 		return nil
 	}
 
-	// 检查账号是否需要清理粘性会话
-	// Check if sticky session should be cleared
+	// 检查账号是否需要清理粘性会话。
+	// 删除后仍判断平台和模型。二者匹配且 User-Agent 拒绝时设置已有指针，本请求不写回退账号。
+	// User-Agent 允许时不设置指针，不可调度的粘性会话仍绑定回退账号。
+	//
+	// Check if sticky session should be cleared.
+	// After the delete, still resolve platform and model. When both match and
+	// the User-Agent rule blocks the account, set the existing cleared pointer
+	// so this request does not store the fallback. An allowed User-Agent leaves
+	// the pointer unset.
 	if shouldClearStickySession(account, requestedModel) {
 		_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), cacheKey)
+		if s.geminiAccountMatchesPlatformAndModel(account, requestedModel, platform, useMixedScheduling) {
+			var stickyUA uaFilterStats
+			if userAgentBlocksCandidate(ctx, account, &stickyUA) {
+				markStickyBindingClearedByUserAgent(ctx)
+			}
+		}
 		return nil
 	}
 
-	// 验证账号是否可用于当前请求
-	// Verify account is usable for current request
-	if !s.isAccountUsableForRequest(ctx, account, requestedModel, platform, useMixedScheduling) {
+	// 平台或模型不匹配不是 User-Agent 失败，也不删除绑定。
+	// A platform or model miss is not a User-Agent failure and does not delete the binding.
+	if !s.geminiAccountMatchesPlatformAndModel(account, requestedModel, platform, useMixedScheduling) {
+		return nil
+	}
+
+	// 粘性账号未通过 User-Agent 时删除本次绑定，且本请求不写回替代账号。
+	// A sticky account that fails the User-Agent rule drops this binding.
+	// The cleared pointer stops this request from storing a replacement.
+	var stickyUA uaFilterStats
+	if userAgentBlocksCandidate(ctx, account, &stickyUA) {
+		_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), cacheKey)
+		markStickyBindingClearedByUserAgent(ctx)
+		return nil
+	}
+
+	// 限流和配额晚于 User-Agent。未通过时沿用原逻辑：不删除绑定。
+	// Rate limit and quota run after the User-Agent rule. A miss keeps the binding.
+	if !s.geminiAccountPassesTransientChecks(ctx, account, requestedModel, nil) {
 		return nil
 	}
 
@@ -245,52 +297,40 @@ func (s *GeminiMessagesCompatService) tryStickySessionHit(
 	return account
 }
 
-// isAccountUsableForRequest 检查账号是否可用于当前请求。
-// 验证：模型调度、模型支持、平台匹配、速率限制预检。
+// geminiAccountMatchesPlatformAndModel 判断账号是否属于本次选号的平台和模型候选集。
+// 分组已由查询限定。这里的未命中不计入 User-Agent 统计。
 //
-// isAccountUsableForRequest checks if account is usable for current request.
-// Validates: model scheduling, model support, platform matching, rate limit precheck.
-func (s *GeminiMessagesCompatService) isAccountUsableForRequest(
-	ctx context.Context,
+// geminiAccountMatchesPlatformAndModel reports platform and model eligibility.
+// Group scope is applied by the account query. A miss is not a User-Agent candidate.
+func (s *GeminiMessagesCompatService) geminiAccountMatchesPlatformAndModel(
 	account *Account,
 	requestedModel, platform string,
 	useMixedScheduling bool,
 ) bool {
-	return s.isAccountUsableForRequestWithPrecheck(ctx, account, requestedModel, platform, useMixedScheduling, nil)
-}
-
-func (s *GeminiMessagesCompatService) isAccountUsableForRequestWithPrecheck(
-	ctx context.Context,
-	account *Account,
-	requestedModel, platform string,
-	useMixedScheduling bool,
-	precheckResult map[int64]bool,
-) bool {
-	// 检查模型调度能力
-	// Check model scheduling capability
-	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
+	if account == nil {
 		return false
 	}
-
-	// 检查模型支持
-	// Check model support
 	if requestedModel != "" && !s.isModelSupportedByAccount(account, requestedModel) {
 		return false
 	}
+	return s.isAccountValidForPlatform(account, platform, useMixedScheduling)
+}
 
-	// 检查平台匹配
-	// Check platform matching
-	if !s.isAccountValidForPlatform(account, platform, useMixedScheduling) {
+// geminiAccountPassesTransientChecks 检查限流、配额和其他暂时不可调度状态。
+// 调用方必须先完成平台、模型和 User-Agent 判断。
+//
+// geminiAccountPassesTransientChecks applies rate limit, quota, and other
+// transient unschedulability after platform, model, and User-Agent checks.
+func (s *GeminiMessagesCompatService) geminiAccountPassesTransientChecks(
+	ctx context.Context,
+	account *Account,
+	requestedModel string,
+	precheckResult map[int64]bool,
+) bool {
+	if account == nil || !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
 		return false
 	}
-
-	// 速率限制预检
-	// Rate limit precheck
-	if !s.passesRateLimitPreCheckWithCache(ctx, account, requestedModel, precheckResult) {
-		return false
-	}
-
-	return true
+	return s.passesRateLimitPreCheckWithCache(ctx, account, requestedModel, precheckResult)
 }
 
 // isAccountValidForPlatform 检查账号是否匹配目标平台。
@@ -327,10 +367,13 @@ func (s *GeminiMessagesCompatService) passesRateLimitPreCheckWithCache(ctx conte
 }
 
 // selectBestGeminiAccount 从候选账号中选择最佳账号（优先级 + LRU + OAuth 优先）。
-// 返回 nil 表示无可用账号。
+// 只统计平台和模型都匹配的账号。User-Agent 失败在限流和配额之前跳过。
+// 没有选出账号时，全部被拒绝则返回 ErrUserAgentNotAllowed，否则返回 nil error。
 //
-// selectBestGeminiAccount selects best account from candidates (priority + LRU + OAuth preferred).
-// Returns nil if no available account.
+// selectBestGeminiAccount selects the best account (priority + LRU + OAuth preferred).
+// Only platform-and-model matches are counted. A User-Agent miss is skipped before
+// rate limit and quota. A nil account with ErrUserAgentNotAllowed means every
+// counted candidate failed the rule; a nil error keeps the caller's Gemini error.
 func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 	ctx context.Context,
 	accounts []Account,
@@ -338,20 +381,26 @@ func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 	excludedIDs map[int64]struct{},
 	platform string,
 	useMixedScheduling bool,
-) *Account {
+) (*Account, error) {
 	var selected *Account
+	var uaStats uaFilterStats
 	precheckResult := s.buildPreCheckUsageResultMap(ctx, accounts, requestedModel)
 
 	for i := range accounts {
 		acc := &accounts[i]
 
-		// 跳过被排除的账号
+		// 跳过被排除的账号。排除账号不是 User-Agent 候选。
 		if _, excluded := excludedIDs[acc.ID]; excluded {
 			continue
 		}
 
-		// 检查账号是否可用于当前请求
-		if !s.isAccountUsableForRequestWithPrecheck(ctx, acc, requestedModel, platform, useMixedScheduling, precheckResult) {
+		if !s.geminiAccountMatchesPlatformAndModel(acc, requestedModel, platform, useMixedScheduling) {
+			continue
+		}
+		if userAgentBlocksCandidate(ctx, acc, &uaStats) {
+			continue
+		}
+		if !s.geminiAccountPassesTransientChecks(ctx, acc, requestedModel, precheckResult) {
 			continue
 		}
 
@@ -366,7 +415,40 @@ func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 		}
 	}
 
-	return selected
+	if selected == nil {
+		return nil, uaStats.errorOr(nil)
+	}
+	return selected, nil
+}
+
+// persistentGeminiCandidateAllows reports whether an account omitted by the
+// schedulable query for transient runtime state would accept the User-Agent.
+func (s *GeminiMessagesCompatService) persistentGeminiCandidateAllows(ctx context.Context, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, useMixed bool) bool {
+	if s == nil || s.accountRepo == nil {
+		return false
+	}
+	userAgent, enforced := InboundUserAgentFromContext(ctx)
+	if !enforced {
+		return false
+	}
+	platforms := []string{platform}
+	if useMixed {
+		platforms = append(platforms, PlatformAntigravity)
+	}
+	simpleMode := s.cfg != nil && s.cfg.RunMode == config.RunModeSimple
+	accounts, err := loadPersistentUserAgentCandidates(ctx, s.accountRepo, groupID, platforms, userAgentAvailabilityIncludesGrouped(groupID, simpleMode))
+	if err != nil {
+		return false
+	}
+	return persistentCandidateAllowsUserAgent(accounts, userAgent, func(account *Account) bool {
+		if account == nil {
+			return false
+		}
+		if _, excluded := excludedIDs[account.ID]; excluded {
+			return false
+		}
+		return s.geminiAccountMatchesPlatformAndModel(account, requestedModel, platform, useMixed)
+	})
 }
 
 func (s *GeminiMessagesCompatService) buildPreCheckUsageResultMap(ctx context.Context, accounts []Account, requestedModel string) map[int64]bool {

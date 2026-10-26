@@ -82,6 +82,10 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})
 			return
 		}
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			googleErrorWithType(c, status, errType, "", message)
+			return
+		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
 		return
@@ -266,6 +270,10 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		if hasAntigravity {
 			// antigravity 账户使用静态模型信息
 			c.JSON(http.StatusOK, gemini.FallbackModel(modelName))
+			return
+		}
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			googleErrorWithType(c, status, errType, "", message)
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -569,6 +577,14 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			if failoverClientGone(c) {
 				reqLog.Info("gemini.account_select_aborted_client_disconnected", zap.Error(err))
 				return
+			}
+			// 仅首次选号把 User-Agent 哨兵写成 403。已有账号被上游拒绝后，
+			// 下一次选号可能只剩拒绝该客户端的账号；此时沿用耗尽处理。
+			if len(fs.FailedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					googleErrorWithType(c, status, errType, "", message)
+					return
+				}
 			}
 			if cachedContentBinding != nil {
 				if fs.LastFailoverErr != nil {

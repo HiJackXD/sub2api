@@ -107,6 +107,10 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	if err != nil {
 		reqLog.Warn("openai_input_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			h.errorResponse(c, status, errType, message)
+			return
+		}
 		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, reqModel)
 		if !cls.ModelNotFound {
 			markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -115,6 +119,10 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 		return
 	}
 	if account == nil {
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			h.errorResponse(c, status, errType, message)
+			return
+		}
 		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, reqModel)
 		if !cls.ModelNotFound {
 			markOpsRoutingCapacityLimited(c)
@@ -280,6 +288,10 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	if err != nil {
 		requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
 		reqLog.Warn("openai_count_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			h.anthropicErrorResponse(c, status, errType, message)
+			return
+		}
 		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 		if !cls.ModelNotFound {
 			markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -288,6 +300,10 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 		return
 	}
 	if account == nil {
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			h.anthropicErrorResponse(c, status, errType, message)
+			return
+		}
 		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 		if !cls.ModelNotFound {
 			markOpsRoutingCapacityLimited(c)

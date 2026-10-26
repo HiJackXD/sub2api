@@ -3238,6 +3238,12 @@
         :type="form.type"
       />
 
+      <UserAgentFilterFields
+        :model-value="uaFilter"
+        :invalid="uaFilterInvalid"
+        @update:model-value="onUAFilterUpdate"
+      />
+
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
@@ -4154,6 +4160,8 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
+import UserAgentFilterFields from '@/components/account/UserAgentFilterFields.vue'
+import { normalizeUAFilter, type UAFilterMode } from '@/components/account/uaFilter'
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
@@ -4246,10 +4254,47 @@ const oauthStepTitle = computed(() => {
 // Platform-specific hints for API Key type
 // 上游ID：直接上游声明请求标识的响应头名，留空不记录。
 const upstreamRequestIdHeader = ref('')
+const uaFilter = ref<{ mode: UAFilterMode; patterns: string[] }>({ mode: 'off', patterns: [] })
+const uaFilterInvalid = ref(false)
+const onUAFilterUpdate = (value: { mode: UAFilterMode; patterns: string[] }) => {
+  uaFilter.value = { mode: value.mode, patterns: [...value.patterns] }
+  uaFilterInvalid.value = false
+}
+const showUAFilterError = () => {
+  uaFilterInvalid.value = true
+  appStore.showError(
+    uaFilter.value.patterns.some((item) => item.trim() !== '')
+      ? t('admin.accounts.uaFilter.invalidPattern')
+      : t('admin.accounts.uaFilter.emptyList')
+  )
+}
 const withUpstreamRequestIdHeader = <T extends Record<string, unknown> | undefined>(extra: T): T | Record<string, unknown> => {
   const name = upstreamRequestIdHeader.value.trim()
   if (!name) return extra
   return { ...(extra || {}), upstream_request_id_header: name }
+}
+const withCreateAccountExtra = (
+  extra: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined | null => {
+  const result = normalizeUAFilter(uaFilter.value.mode, uaFilter.value.patterns)
+  if (!result.ok) {
+    showUAFilterError()
+    return null
+  }
+  uaFilterInvalid.value = false
+  let next: Record<string, unknown> | undefined = extra ? { ...extra } : undefined
+  if (result.mode === 'allow' || result.mode === 'block') {
+    next = {
+      ...(next ?? {}),
+      ua_filter_mode: result.mode,
+      ua_filter_patterns: result.patterns
+    }
+  } else if (next) {
+    delete next.ua_filter_mode
+    delete next.ua_filter_patterns
+  }
+  const withHeader = withUpstreamRequestIdHeader(next)
+  return withHeader ?? undefined
 }
 
 const baseUrlHint = computed(() => {
@@ -5631,6 +5676,8 @@ const resetForm = () => {
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
   upstreamRequestIdHeader.value = ''
+  uaFilter.value = { mode: 'off', patterns: [] }
+  uaFilterInvalid.value = false
   upstreamBillingAutoProbeEnabled.value = true
   editQuotaLimit.value = null
   editQuotaDailyLimit.value = null
@@ -5938,6 +5985,9 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 }
 
 const handleSubmit = async () => {
+  if (withCreateAccountExtra(undefined) === null) {
+    return
+  }
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
     if (!isGrokSSOInputMethod.value && !form.name.trim()) {
@@ -6216,11 +6266,15 @@ const handleSubmit = async () => {
 
   form.credentials = credentials
   const extra = buildAnthropicExtra(buildOpenAIExtra())
+  const createExtra = withCreateAccountExtra(extra)
+  if (createExtra === null) {
+    return
+  }
 
   await doCreateAccount({
     ...form,
     group_ids: form.group_ids,
-    extra: withUpstreamRequestIdHeader(extra),
+    extra: createExtra,
     upstream_billing_probe_enabled: upstreamBillingAutoProbeEnabled.value,
     auto_pause_on_expired: autoPauseOnExpired.value
   })
@@ -6282,8 +6336,12 @@ const createAccountAndFinish = async (
   if (!applyTempUnschedConfig(credentials)) {
     return
   }
+  const preparedExtra = withCreateAccountExtra(extra)
+  if (preparedExtra === null) {
+    return
+  }
   // Inject quota limits for apikey/bedrock accounts
-  let finalExtra = withUpstreamRequestIdHeader(extra)
+  let finalExtra = preparedExtra
   if (type === 'apikey' || type === 'bedrock') {
     const quotaExtra: Record<string, unknown> = { ...(finalExtra || {}) }
     if (editQuotaLimit.value != null && editQuotaLimit.value > 0) {
@@ -6402,6 +6460,10 @@ const handleGrokValidateRT = async (refreshTokenInput: string) => {
         if (!applyTempUnschedConfig(credentials)) {
           return
         }
+        const createExtra = withCreateAccountExtra(extra)
+        if (createExtra === null) {
+          return
+        }
 
         await adminAPI.accounts.create({
           name: accountName,
@@ -6409,7 +6471,7 @@ const handleGrokValidateRT = async (refreshTokenInput: string) => {
           platform: 'grok',
           type: 'oauth',
           credentials,
-          extra: withUpstreamRequestIdHeader(extra),
+          extra: createExtra,
           proxy_id: form.proxy_id,
           concurrency: form.concurrency,
           load_factor: form.load_factor ?? undefined,
@@ -6472,6 +6534,13 @@ const handleGrokImportSSO = async (ssoInput: string) => {
   }
 
   try {
+    // Step 1 already validated the filter. Rebuild extra here so allow/block
+    // patterns are stored. Null stops the import. Off returns undefined and
+    // omits both keys.
+    const createExtra = withCreateAccountExtra(undefined)
+    if (createExtra === null) {
+      return
+    }
     const result = await adminAPI.grok.createFromSSO({
       sso_tokens: ssoTokens,
       name: form.name || undefined,
@@ -6479,6 +6548,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
       proxy_id: form.proxy_id,
       group_ids: form.group_ids,
       credentials,
+      extra: createExtra,
       concurrency: form.concurrency,
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
@@ -6579,6 +6649,10 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
         if (!applyTempUnschedConfig(credentials)) {
           return
         }
+        const createExtra = withCreateAccountExtra(extra)
+        if (createExtra === null) {
+          return
+        }
 
         await adminAPI.accounts.create({
           name: accountName,
@@ -6586,7 +6660,7 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
           platform: 'grok',
           type: 'oauth',
           credentials,
-          extra: withUpstreamRequestIdHeader(extra),
+          extra: createExtra,
           proxy_id: form.proxy_id,
           concurrency: form.concurrency,
           load_factor: form.load_factor ?? undefined,
@@ -6677,6 +6751,10 @@ const handleOpenAIExchange = async (authCode: string) => {
     if (!applyTempUnschedConfig(credentials)) {
       return
     }
+    const createExtra = withCreateAccountExtra(extra)
+    if (createExtra === null) {
+      return
+    }
 
     if (shouldCreateOpenAI) {
       await adminAPI.accounts.create({
@@ -6685,7 +6763,7 @@ const handleOpenAIExchange = async (authCode: string) => {
         platform: 'openai',
         type: 'oauth',
         credentials,
-        extra: withUpstreamRequestIdHeader(extra),
+        extra: createExtra,
         proxy_id: form.proxy_id,
         concurrency: form.concurrency,
         load_factor: form.load_factor ?? undefined,
@@ -6787,6 +6865,10 @@ const handleOpenAIImportCodexSession = async (content: string) => {
 
   try {
     const extra = buildOpenAICodexImportExtra()
+    const createExtra = withCreateAccountExtra(extra)
+    if (createExtra === null) {
+      return
+    }
     const result = await adminAPI.accounts.importCodexSession({
       content: trimmed,
       name: form.name,
@@ -6800,7 +6882,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
       expires_at: form.expires_at,
       auto_pause_on_expired: autoPauseOnExpired.value,
       credential_extras: Object.keys(credentialExtras).length > 0 ? credentialExtras : undefined,
-      extra: withUpstreamRequestIdHeader(extra),
+      extra: createExtra,
       update_existing: true
     })
 
@@ -6865,6 +6947,10 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
 
   try {
     const extra = buildOpenAICodexImportExtra()
+    const createExtra = withCreateAccountExtra(extra)
+    if (createExtra === null) {
+      return
+    }
     await adminAPI.accounts.createOpenAICodexPAT({
       access_token: trimmed,
       name: form.name,
@@ -6878,7 +6964,7 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
       expires_at: form.expires_at,
       auto_pause_on_expired: autoPauseOnExpired.value,
       credential_extras: Object.keys(credentialExtras).length > 0 ? credentialExtras : undefined,
-      extra: withUpstreamRequestIdHeader(extra)
+      extra: createExtra
     })
 
     appStore.showSuccess(t('admin.accounts.accountCreated'))
@@ -6959,6 +7045,10 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
         const baseName = form.name || tokenInfo.email || 'OpenAI OAuth Account'
         const accountName = refreshTokens.length > 1 ? `${baseName} #${i + 1}` : baseName
 
+        const createExtra = withCreateAccountExtra(extra)
+        if (createExtra === null) {
+          return
+        }
         if (shouldCreateOpenAI) {
           await adminAPI.accounts.create({
             name: accountName,
@@ -6966,7 +7056,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
             platform: 'openai',
             type: 'oauth',
             credentials,
-            extra: withUpstreamRequestIdHeader(extra),
+            extra: createExtra,
             proxy_id: form.proxy_id,
             concurrency: form.concurrency,
             load_factor: form.load_factor ?? undefined,
@@ -7059,13 +7149,17 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
         const accountName = refreshTokens.length > 1 ? `${form.name} #${i + 1}` : form.name
 
         // Note: Antigravity doesn't have buildExtraInfo, so we pass empty extra or rely on credentials
+        const createExtra = withCreateAccountExtra({})
+        if (createExtra === null) {
+          return
+        }
         const createPayload = withAntigravityConfirmFlag({
           name: accountName,
           notes: form.notes,
           platform: 'antigravity',
           type: 'oauth',
           credentials,
-          extra: withUpstreamRequestIdHeader({}),
+          extra: createExtra,
           proxy_id: form.proxy_id,
           concurrency: form.concurrency,
           load_factor: form.load_factor ?? undefined,
@@ -7439,6 +7533,10 @@ const handleCookieAuth = async (sessionKey: string) => {
           credentials.temp_unschedulable_enabled = true
           credentials.temp_unschedulable_rules = tempUnschedPayload
         }
+        const createExtra = withCreateAccountExtra(extra)
+        if (createExtra === null) {
+          return
+        }
 
         await adminAPI.accounts.create({
           name: accountName,
@@ -7446,7 +7544,7 @@ const handleCookieAuth = async (sessionKey: string) => {
           platform: form.platform,
           type: addMethod.value, // Use addMethod as type: 'oauth' or 'setup-token'
           credentials,
-          extra: withUpstreamRequestIdHeader(extra),
+          extra: createExtra,
           proxy_id: form.proxy_id,
           concurrency: form.concurrency,
           load_factor: form.load_factor ?? undefined,

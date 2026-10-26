@@ -70,13 +70,15 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	var token string
 	var upstream *service.GrokRealtimeUpstream
 	var candidateSeen bool
+	var selectErr error
 	for attempts := 0; attempts < 4; attempts++ {
 		// Realtime's voice model is not a text-model capability. Passing a
 		// concrete text model here would reject accounts mapped only to an
 		// older/default text model before the upstream handshake can decide.
 		// An empty requested model keeps account selection capability-based;
 		// the actual voice model remains in the upstream WS query below.
-		candidate, _, selectErr := h.gatewayService.SelectAccountWithSchedulerForCapability(
+		var candidate *service.AccountSelectionResult
+		candidate, _, selectErr = h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(), apiKey.GroupID, "", "", "", failed,
 			service.OpenAIUpstreamTransportHTTPSSE,
 			service.OpenAIEndpointCapabilityChatCompletions,
@@ -85,7 +87,6 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		if selectErr != nil || candidate == nil || candidate.Account == nil {
 			break
 		}
-		candidateSeen = true
 		account := candidate.Account
 		var streamStarted bool
 		var slotStatus openAISlotAcquireResult
@@ -105,6 +106,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 			failed[account.ID] = struct{}{}
 			continue
 		}
+		candidateSeen = true
 		probeCtx, cancelProbe := context.WithTimeout(c.Request.Context(), service.DefaultGrokRealtimeDialTimeout)
 		candidateUpstream, openErr := h.gatewayService.OpenGrokRealtime(probeCtx, account, token, model)
 		cancelProbe()
@@ -125,7 +127,13 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		break
 	}
 	if selection == nil || selection.Account == nil || release == nil || upstream == nil {
+		// 403 only when nothing that passed the filter was probed. A later
+		// sentinel must not replace an upstream 502 from an earlier dial.
 		if !candidateSeen {
+			if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
+				h.errorResponse(c, status, errType, message)
+				return
+			}
 			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available Grok accounts")
 		} else {
 			h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Grok realtime upstream unavailable")
@@ -243,6 +251,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 
 	failed := map[int64]struct{}{}
 	var last *service.UpstreamFailoverError
+	var probed bool
 	reqLog := requestLogger(c, "handler.openai_gateway.grok_voice", zap.String("endpoint", endpoint))
 	selectionModel := "grok-4.5"
 
@@ -262,6 +271,12 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			service.PlatformGrok,
 		)
 		if selectErr != nil || selection == nil || selection.Account == nil {
+			if !probed && last == nil {
+				if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
+					h.errorResponse(c, status, errType, message)
+					return
+				}
+			}
 			if last != nil {
 				h.handleFailoverExhausted(c, last, false)
 			} else {
@@ -285,6 +300,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			failed[account.ID] = struct{}{}
 			continue
 		}
+		probed = true
 		result, forwardErr := func() (*service.OpenAIForwardResult, error) {
 			defer release()
 			return h.gatewayService.ForwardGrokVoice(c.Request.Context(), c, account, endpoint, body, contentType)

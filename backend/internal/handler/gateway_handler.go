@@ -354,6 +354,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 				if len(fs.FailedAccountIDs) == 0 {
+					if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+						h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+						return
+					}
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, service.PlatformGemini)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -688,6 +692,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 				if len(fs.FailedAccountIDs) == 0 {
+					if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+						h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+						return
+					}
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -2232,6 +2240,10 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	account, err := h.gatewayService.SelectAccountForModel(c.Request.Context(), apiKey.GroupID, sessionHash, parsedReq.Model)
 	if err != nil {
 		reqLog.Warn("gateway.count_tokens_select_account_failed", zap.Error(err))
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			h.errorResponse(c, status, errType, message)
+			return
+		}
 		cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, parsedReq.Model, parsedReq.Model, service.PlatformAnthropic)
 		if !cls.ModelNotFound {
 			markOpsRoutingCapacityLimitedIfNoAvailable(c, err)

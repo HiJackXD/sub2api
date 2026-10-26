@@ -239,6 +239,29 @@ func TestLockAndMergeAccountProbeExtraProtectsOllamaManagedFields(t *testing.T) 
 	}
 }
 
+func TestUpdateExtraClearOnlyUserAgentFilterEnqueuesOutbox(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	t.Cleanup(func() { _ = client.Close() })
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`(?s)UPDATE accounts SET extra = .* - 'ua_filter_mode' - 'ua_filter_patterns'`).
+		WithArgs(int64(27)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox")).
+		WithArgs(service.SchedulerOutboxEventAccountChanged, int64(27), nil, nil, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	repo := newAccountRepositoryWithSQL(client, db, nil)
+
+	err = repo.UpdateExtra(context.Background(), 27, map[string]any{service.UAFilterClearOnMergeKey: true})
+
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUpdateExtraExplicitProbeDisableRemovesSnapshot(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)

@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -231,8 +232,36 @@ func resolveOpenAIUpstreamOriginator(c *gin.Context, isOfficialClient bool) stri
 	return "opencode"
 }
 
+// clearStickySessionForUserAgent drops a pinned OpenAI session when that account
+// fails the inbound User-Agent rule. A model miss returns false and does not
+// count the account or delete the binding. A User-Agent miss deletes the
+// binding unless preserve is set, and marks the request so this request does
+// not store a replacement account.
+func (s *OpenAIGatewayService) clearStickySessionForUserAgent(ctx context.Context, groupID *int64, sessionHash string, account *Account, requestedModel string, requireCompact bool, preserve bool) bool {
+	if s == nil || account == nil {
+		return false
+	}
+	if strings.TrimSpace(requestedModel) != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
+		return false
+	}
+	var uaStats uaFilterStats
+	if !userAgentBlocksCandidate(ctx, account, &uaStats) {
+		return false
+	}
+	sessionHash = strings.TrimSpace(sessionHash)
+	if preserve || sessionHash == "" {
+		return true
+	}
+	_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+	markStickyBindingClearedByUserAgent(ctx)
+	return true
+}
+
 // BindStickySession sets session -> account binding with standard TTL.
 func (s *OpenAIGatewayService) BindStickySession(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
+	if stickyBindingClearedByUserAgentRequest(ctx) {
+		return nil
+	}
 	if sessionHash == "" || accountID <= 0 {
 		return nil
 	}
@@ -387,6 +416,17 @@ func isOpenAICompatibleAccountEligibleForRequestBeforeProfit(ctx context.Context
 }
 
 func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Context, account *Account, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) string {
+	if reason := openAIUserAgentCandidateFailureReason(ctx, account, platform, requestedModel, requireCompact, requiredCapability); reason != "" {
+		return reason
+	}
+	return openAITransientQuotaAndModelRateLimitReason(ctx, account, requestedModel)
+}
+
+// openAIUserAgentCandidateFailureReason is the part of eligibility that decides
+// whether an account is in the User-Agent candidate set: platform and model,
+// plus the non-transient gates that already preceded them. A model miss is
+// model_not_supported and must not touch uaFilterStats.
+func openAIUserAgentCandidateFailureReason(ctx context.Context, account *Account, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) string {
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if account == nil {
 		return "account_nil"
@@ -404,11 +444,48 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	if account.Platform != platform || !account.IsOpenAICompatible() {
 		return "platform_mismatch"
 	}
-	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
-		if account.IsSchedulable() {
-			return "model_rate_limited"
+	if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
+		return "model_not_supported"
+	}
+	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
+		if account.IsGrok() && requiredCapability == OpenAIEndpointCapabilityGrokMediaGeneration {
+			_, reason := account.GrokMediaGenerationEligibility()
+			slog.Debug("grok_media_account_ineligible", "account_id", account.ID, "reason", reason)
 		}
+		return "capability_mismatch"
+	}
+	if requireCompact && openAICompactSupportTier(account) == 0 {
+		return "compact_unsupported"
+	}
+	return ""
+}
+
+// openAIModelRateLimitFailureReason reports a model-scoped cooldown on an
+// otherwise schedulable account. Account-level IsSchedulable failures are
+// reported by openAITransientQuotaAndModelRateLimitReason after the User-Agent
+// rule so a temporary block cannot hide that decision.
+func openAIModelRateLimitFailureReason(ctx context.Context, account *Account, requestedModel string) string {
+	if account == nil || !account.IsSchedulable() {
+		return ""
+	}
+	if account.isModelRateLimitedWithContext(ctx, requestedModel) {
+		return "model_rate_limited"
+	}
+	return ""
+}
+
+// openAITransientQuotaAndModelRateLimitReason is the quota and model rate-limit
+// portion of eligibility. Callers that classify User-Agent failures run it
+// after userAgentBlocksCandidate so a temporary block cannot hide that decision.
+func openAITransientQuotaAndModelRateLimitReason(ctx context.Context, account *Account, requestedModel string) string {
+	if account == nil {
+		return ""
+	}
+	if !account.IsSchedulable() {
 		return "not_schedulable"
+	}
+	if reason := openAIModelRateLimitFailureReason(ctx, account, requestedModel); reason != "" {
+		return reason
 	}
 	if account.IsOpenAI() {
 		if paused, reason := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {
@@ -439,19 +516,6 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 			}
 			return "quota_auto_pause"
 		}
-	}
-	if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
-		return "model_not_supported"
-	}
-	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
-		if account.IsGrok() && requiredCapability == OpenAIEndpointCapabilityGrokMediaGeneration {
-			_, reason := account.GrokMediaGenerationEligibility()
-			slog.Debug("grok_media_account_ineligible", "account_id", account.ID, "reason", reason)
-		}
-		return "capability_mismatch"
-	}
-	if requireCompact && openAICompactSupportTier(account) == 0 {
-		return "compact_unsupported"
 	}
 	return ""
 }
@@ -902,7 +966,14 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 
 // selectAccountForModelWithExclusionsStickyHit 与 selectAccountForModelWithExclusions 相同，
 // 另返回账号是否来自粘性会话命中。
-func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, bool, error) {
+func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (_ *Account, _ bool, err error) {
+	ctx = WithStickyBindingClearedByUserAgent(ctx)
+	ctx, uaStats := withUAFilterStats(ctx)
+	defer func() {
+		if err != nil {
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, openAIUserAgentConfirmSelectBest)
+		}
+	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -975,6 +1046,11 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	if err != nil {
 		return nil
 	}
+	// Eligibility below checks the model with requireCompact false. Match that
+	// so a model miss is not treated as a User-Agent failure.
+	if s.clearStickySessionForUserAgent(ctx, groupID, sessionHash, account, requestedModel, false, false) {
+		return nil
+	}
 
 	// 检查账号是否需要清理粘性会话
 	// Check if sticky session should be cleared
@@ -1013,6 +1089,77 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	return account
 }
 
+// openAIAccountBeforeTransientUnschedulability loads the account selectBestAccount
+// would resolve and applies platform, model, capability, privacy, parent health,
+// and scheduling threshold. Model rate limit, quota auto-pause, runtime block,
+// and proxy quarantine stay with the caller so the User-Agent rule runs first.
+// A nil result keeps the historical ineligible bucket, including a model miss.
+func (s *OpenAIGatewayService) openAIAccountBeforeTransientUnschedulability(
+	ctx context.Context,
+	account *Account,
+	groupID *int64,
+	platform string,
+	requestedModel string,
+	requiredCapability OpenAIEndpointCapability,
+) *Account {
+	if s == nil || account == nil {
+		return nil
+	}
+	platform = NormalizeOpenAICompatiblePlatform(platform)
+	fresh := account
+	if s.schedulerSnapshot != nil {
+		current, err := s.getSchedulableAccount(ctx, account.ID)
+		if err != nil || current == nil {
+			return nil
+		}
+		fresh = current
+		if !s.openAIAccountPassesStableSelectionGates(ctx, fresh, nil, platform, requestedModel, requiredCapability) {
+			return nil
+		}
+		if s.accountRepo == nil {
+			if !s.openAIAccountPassesStableSelectionGates(ctx, fresh, groupID, platform, requestedModel, requiredCapability) {
+				return nil
+			}
+			return fresh
+		}
+		latest, err := s.accountRepo.GetByID(ctx, fresh.ID)
+		if err != nil || latest == nil || !s.openAIAccountMatchesSchedulingGroup(latest, groupID) {
+			return nil
+		}
+		if !s.openAIAccountPassesStableSelectionGates(ctx, latest, groupID, platform, requestedModel, requiredCapability) {
+			return nil
+		}
+		return latest
+	}
+	if !s.openAIAccountPassesStableSelectionGates(ctx, fresh, groupID, platform, requestedModel, requiredCapability) {
+		return nil
+	}
+	return fresh
+}
+
+func (s *OpenAIGatewayService) openAIAccountPassesStableSelectionGates(
+	ctx context.Context,
+	account *Account,
+	groupID *int64,
+	platform string,
+	requestedModel string,
+	requiredCapability OpenAIEndpointCapability,
+) bool {
+	if account == nil {
+		return false
+	}
+	if groupID != nil && s.openAIGroupRequiresPrivacySet(ctx, groupID) && !account.IsPrivacySet() {
+		return false
+	}
+	if openAIUserAgentCandidateFailureReason(ctx, account, platform, requestedModel, false, requiredCapability) != "" {
+		return false
+	}
+	if s.isOpenAIAccountBlockedBySchedulingThreshold(ctx, account) {
+		return false
+	}
+	return parentHealthyForShadow(account, s.parentAccountLookup(ctx))
+}
+
 // selectBestAccount 从候选账号中选择最佳账号（优先级 + LRU）。
 // 返回 nil 表示无可用账号。
 //
@@ -1040,13 +1187,20 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			continue
 		}
 
-		fresh := s.resolveFreshSchedulableOpenAIAccountBeforeProfit(ctx, acc, platform, requestedModel, false, requiredCapability)
+		// Platform and model first. Transient unschedulability is applied after
+		// the User-Agent rule; a miss here stays ineligible and does not count.
+		fresh := s.openAIAccountBeforeTransientUnschedulability(ctx, acc, groupID, platform, requestedModel, requiredCapability)
 		if fresh == nil {
 			filterStats.exclude("ineligible")
 			continue
 		}
-		fresh = s.recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx, fresh, groupID, platform, requestedModel, false, requiredCapability)
-		if fresh == nil {
+		if userAgentBlocksCandidate(ctx, fresh, nil) {
+			filterStats.exclude("user_agent")
+			continue
+		}
+		if openAITransientQuotaAndModelRateLimitReason(ctx, fresh, requestedModel) != "" ||
+			s.isOpenAIAccountRequestRuntimeBlocked(fresh, requestedModel) ||
+			s.isOpenAIProxyStreamQuarantined(ctx, fresh) {
 			filterStats.exclude("ineligible")
 			continue
 		}
@@ -1135,7 +1289,9 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 	return s.selectAccountWithLoadAwareness(ctx, groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, "", true)
 }
 
-func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (*AccountSelectionResult, error) {
+func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (_ *AccountSelectionResult, err error) {
+	ctx = WithStickyBindingClearedByUserAgent(ctx)
+	ctx, uaStats := withUAFilterStats(ctx)
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -1184,6 +1340,14 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		return markStickySessionHit(selection, stickyHit), selectErr
 	}
 
+	// Load-batch candidates count capability, composite ownership, and profit
+	// before the User-Agent rule. The batch-off path confirms in the callee.
+	defer func() {
+		if err != nil {
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, openAIUserAgentConfirmLoadBatch)
+		}
+	}()
+
 	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
 	if err != nil {
 		return nil, err
@@ -1211,11 +1375,15 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if accountID > 0 && !isExcluded(accountID) {
 			account, err := s.getSchedulableAccount(ctx, accountID)
 			if err == nil {
-				clearSticky := shouldClearStickySession(account, requestedModel)
+				uaBlocked := s.clearStickySessionForUserAgent(ctx, groupID, sessionHash, account, requestedModel, false, false)
+				clearSticky := false
+				if !uaBlocked {
+					clearSticky = shouldClearStickySession(account, requestedModel)
+				}
 				if clearSticky {
 					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 				}
-				if !clearSticky && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
+				if !uaBlocked && !clearSticky && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
 					account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
 					if account == nil {
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
@@ -1279,10 +1447,22 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			filterStats.exclude("excluded")
 			continue
 		}
-		// Scheduler snapshots can be temporarily stale (bucket rebuild is throttled);
-		// re-check schedulability here so recently rate-limited/overloaded accounts
-		// are not selected again before the bucket is rebuilt.
-		if reason := openAICompatibleAccountEligibilityFailureReason(ctx, acc, platform, requestedModel, false, requiredCapability); reason != "" {
+		// Platform and model define the User-Agent candidate set. Quota, model
+		// rate limit, runtime block, and proxy quarantine still run in this
+		// filter so those accounts cannot be selected, but only after the rule.
+		if reason := openAIUserAgentCandidateFailureReason(ctx, acc, platform, requestedModel, false, requiredCapability); reason != "" {
+			filterStats.exclude(reason)
+			continue
+		}
+		if vetoed, reason := openAIProfitControlVetoReason(ctx, acc); vetoed {
+			filterStats.exclude(reason)
+			continue
+		}
+		if userAgentBlocksCandidate(ctx, acc, nil) {
+			filterStats.exclude("user_agent")
+			continue
+		}
+		if reason := openAITransientQuotaAndModelRateLimitReason(ctx, acc, requestedModel); reason != "" {
 			filterStats.exclude(reason)
 			continue
 		}
@@ -1292,6 +1472,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 		if s.isOpenAIAccountRequestRuntimeBlocked(acc, requestedModel) {
 			filterStats.exclude("runtime_blocked")
+			continue
+		}
+		if s.isOpenAIProxyStreamQuarantined(ctx, acc) {
+			filterStats.exclude("proxy_stream_quarantined")
 			continue
 		}
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, acc, requestedModel, requireCompact) {
@@ -1495,6 +1679,157 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		return nil, ErrNoAvailableCompactAccounts
 	}
 	return nil, ErrNoAvailableAccounts
+}
+
+type openAIUserAgentConfirmMode int
+
+const (
+	// Load-batch selection counts capability, composite ownership, and profit
+	// before the User-Agent rule.
+	openAIUserAgentConfirmLoadBatch openAIUserAgentConfirmMode = iota
+	// The advanced scheduler counts privacy, composite ownership, and parent
+	// health before the rule. Capability and profit run after it.
+	openAIUserAgentConfirmAdvanced
+	// selectBestAccount counts privacy, capability, composite ownership, and
+	// parent health before the rule. Profit and IsSchedulable run after it.
+	openAIUserAgentConfirmSelectBest
+)
+
+// confirmOpenAIUserAgentDenial replaces ErrUserAgentNotAllowed with the
+// existing no-account error when a persistently configured account would have
+// passed this path's pre-count gates and accepted the client. Rate limit,
+// overload, and temporary unschedulability stay out of those gates so they
+// can still clear the sentinel. Load-batch confirmation keeps capability,
+// composite ownership, and profit. Advanced confirmation keeps privacy,
+// composite ownership, and parent health, and leaves capability and profit
+// out because those run after the rule. selectBestAccount confirmation keeps
+// privacy, capability, composite ownership, and parent health.
+func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context, stats *uaFilterStats, existing error, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, mode openAIUserAgentConfirmMode) error {
+	if stats == nil {
+		return existing
+	}
+	decided := stats.errorOr(existing)
+	if !errors.Is(decided, ErrUserAgentNotAllowed) || s == nil || s.accountRepo == nil {
+		return decided
+	}
+	userAgent, enforced := InboundUserAgentFromContext(ctx)
+	if !enforced {
+		return decided
+	}
+	platform = NormalizeOpenAICompatiblePlatform(platform)
+	simpleMode := s.cfg != nil && s.cfg.RunMode == config.RunModeSimple
+	accounts, err := loadPersistentUserAgentCandidates(ctx, s.accountRepo, groupID, []string{platform}, userAgentAvailabilityIncludesGrouped(groupID, simpleMode))
+	if err != nil {
+		return decided
+	}
+	keep := s.openAIUserAgentAvailabilityKeep(ctx, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, mode)
+	return stats.errorOrUnlessPersistentAllows(existing, userAgent, accounts, keep)
+}
+
+func (s *OpenAIGatewayService) openAIUserAgentAvailabilityKeep(ctx context.Context, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, mode openAIUserAgentConfirmMode) func(*Account) bool {
+	return func(account *Account) bool {
+		if account == nil || account.Platform != platform || !account.IsOpenAICompatible() {
+			return false
+		}
+		if _, excluded := excludedIDs[account.ID]; excluded {
+			return false
+		}
+		if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
+			return false
+		}
+		switch mode {
+		case openAIUserAgentConfirmAdvanced:
+			return s.openAIAdvancedUserAgentPreCountPassed(ctx, groupID, account)
+		case openAIUserAgentConfirmSelectBest:
+			return s.openAISelectBestUserAgentPreCountPassed(ctx, groupID, account, requiredCapability)
+		default:
+			if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
+				return false
+			}
+			if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+				if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+					return false
+				}
+			}
+			if vetoed, _ := openAIProfitControlVetoReason(ctx, account); vetoed {
+				return false
+			}
+			return true
+		}
+	}
+}
+
+// openAIAdvancedUserAgentPreCountPassed reports the gates the advanced
+// scheduler applies before counting a User-Agent decision. Capability and
+// profit run after that decision, and IsSchedulable stays out so a
+// rate-limited account can still clear the sentinel.
+func (s *OpenAIGatewayService) openAIAdvancedUserAgentPreCountPassed(ctx context.Context, groupID *int64, account *Account) bool {
+	if s != nil && s.openAIGroupRequiresPrivacySet(ctx, groupID) && !account.IsPrivacySet() {
+		return false
+	}
+	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+			return false
+		}
+	}
+	return parentHealthyForShadow(account, s.openAIUserAgentParentLookup(ctx))
+}
+
+// openAISelectBestUserAgentPreCountPassed reports the gates selectBestAccount
+// applies before counting a User-Agent decision: privacy, endpoint capability,
+// composite ownership, and parent health. Profit and IsSchedulable run after
+// that decision, so they stay out and a rate-limited account can still clear
+// the sentinel. It does not call openAIAccountPassesStableSelectionGates,
+// because that helper's scheduling-threshold check can park an account that
+// would still accept the client.
+func (s *OpenAIGatewayService) openAISelectBestUserAgentPreCountPassed(ctx context.Context, groupID *int64, account *Account, requiredCapability OpenAIEndpointCapability) bool {
+	if account == nil {
+		return false
+	}
+	if s != nil && groupID != nil && s.openAIGroupRequiresPrivacySet(ctx, groupID) && !account.IsPrivacySet() {
+		return false
+	}
+	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
+		return false
+	}
+	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+			return false
+		}
+	}
+	lookup := func(int64) *Account { return nil }
+	if s != nil {
+		lookup = s.parentAccountLookup(ctx)
+	}
+	return parentHealthyForShadow(account, lookup)
+}
+
+// openAIUserAgentParentLookup resolves a shadow parent the same way the
+// advanced scheduler does, without falling through SchedulerSnapshotService.GetAccount
+// when that service has no repository.
+func (s *OpenAIGatewayService) openAIUserAgentParentLookup(ctx context.Context) func(int64) *Account {
+	return func(id int64) *Account {
+		if id <= 0 || s == nil {
+			return nil
+		}
+		if s.schedulerSnapshot != nil {
+			if s.schedulerSnapshot.cache != nil {
+				if account, err := s.schedulerSnapshot.cache.GetAccount(ctx, id); err == nil && account != nil {
+					return account
+				}
+			}
+			if s.schedulerSnapshot.accountRepo != nil {
+				if account, err := s.schedulerSnapshot.accountRepo.GetByID(ctx, id); err == nil && account != nil {
+					return account
+				}
+			}
+		}
+		if s.accountRepo == nil {
+			return nil
+		}
+		account, _ := s.accountRepo.GetByID(ctx, id)
+		return account
+	}
 }
 
 func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, groupID *int64, platform string) ([]Account, error) {
