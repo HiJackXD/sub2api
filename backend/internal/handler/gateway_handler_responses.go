@@ -194,7 +194,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				return
 			}
 			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
-				h.responsesErrorResponse(c, status, errType, message)
+				writeResponsesUserAgentNotAllowed(c, status, errType, message)
 				return
 			}
 			if len(fs.FailedAccountIDs) == 0 {
@@ -380,6 +380,19 @@ func (h *GatewayHandler) responsesErrorResponse(c *gin.Context, status int, code
 	c.JSON(status, gin.H{
 		"error": gin.H{
 			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+// writeResponsesUserAgentNotAllowed writes the User-Agent sentinel on the
+// Responses route. Other errors on this route store the type in error.code, so
+// this sentinel sets both error.type and error.code.
+func writeResponsesUserAgentNotAllowed(c *gin.Context, status int, errType, message string) {
+	c.JSON(status, gin.H{
+		"error": gin.H{
+			"type":    errType,
+			"code":    errType,
 			"message": message,
 		},
 	})

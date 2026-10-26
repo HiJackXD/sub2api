@@ -127,11 +127,13 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		break
 	}
 	if selection == nil || selection.Account == nil || release == nil || upstream == nil {
-		if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
-			h.errorResponse(c, status, errType, message)
-			return
-		}
+		// 403 only when nothing that passed the filter was probed. A later
+		// sentinel must not replace an upstream 502 from an earlier dial.
 		if !candidateSeen {
+			if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
+				h.errorResponse(c, status, errType, message)
+				return
+			}
 			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available Grok accounts")
 		} else {
 			h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Grok realtime upstream unavailable")
@@ -249,6 +251,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 
 	failed := map[int64]struct{}{}
 	var last *service.UpstreamFailoverError
+	var probed bool
 	reqLog := requestLogger(c, "handler.openai_gateway.grok_voice", zap.String("endpoint", endpoint))
 	selectionModel := "grok-4.5"
 
@@ -268,9 +271,11 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			service.PlatformGrok,
 		)
 		if selectErr != nil || selection == nil || selection.Account == nil {
-			if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
-				h.errorResponse(c, status, errType, message)
-				return
+			if !probed && last == nil {
+				if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
+					h.errorResponse(c, status, errType, message)
+					return
+				}
 			}
 			if last != nil {
 				h.handleFailoverExhausted(c, last, false)
@@ -279,6 +284,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			}
 			return
 		}
+		probed = true
 		account := selection.Account
 		var started bool
 		release, status := h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", selection, false, &started, reqLog)

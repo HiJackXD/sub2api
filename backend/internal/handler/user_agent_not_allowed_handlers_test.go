@@ -5,16 +5,23 @@ package handler
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 const userAgentNotAllowedGoogleBody = `{"error":{"code":403,"message":"No available account accepts this User-Agent","status":"PERMISSION_DENIED"}}`
@@ -266,4 +273,295 @@ func TestGrokRealtime_UserAgentNotAllowed(t *testing.T) {
 
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	require.JSONEq(t, userAgentNotAllowedOpenAIBody, rec.Body.String())
+}
+
+func uaBlockedAnthropicAccount() service.Account {
+	return service.Account{
+		ID:          31,
+		Platform:    service.PlatformAnthropic,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{"api_key": "sk-ant"},
+		Extra: map[string]any{
+			"ua_filter_mode":     "block",
+			"ua_filter_patterns": []string{"python-requests"},
+		},
+	}
+}
+
+func uaBlockedOpenAIAccount() service.Account {
+	return service.Account{
+		ID:          41,
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{"api_key": "sk-openai"},
+		Extra: map[string]any{
+			"ua_filter_mode":     "block",
+			"ua_filter_patterns": []string{"python-requests"},
+		},
+	}
+}
+
+func uaAllowedGrokAccount() service.Account {
+	return service.Account{
+		ID:          22,
+		Platform:    service.PlatformGrok,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{"api_key": "grok-allowed"},
+	}
+}
+
+func requireUserAgentForbiddenOpenAI(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	require.JSONEq(t, userAgentNotAllowedOpenAIBody, rec.Body.String())
+	require.Equal(t, "forbidden_error", gjson.Get(rec.Body.String(), "error.type").String())
+	require.Equal(t, service.UserAgentNotAllowedMessage, gjson.Get(rec.Body.String(), "error.message").String())
+	require.NotContains(t, rec.Body.String(), "ua_filter")
+}
+
+func TestUserAgentNotAllowedResponsesBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(81)
+	group := &service.Group{ID: groupID, Platform: service.PlatformAnthropic, Status: service.StatusActive, Hydrated: true}
+	repo := &uaFilterAccountRepoStub{accounts: []service.Account{uaBlockedAnthropicAccount()}}
+	h := &GatewayHandler{
+		gatewayService:      newUAGatewayService(repo),
+		billingCacheService: newSimpleBillingForUATest(t),
+		concurrencyHelper:   NewConcurrencyHelper(service.NewConcurrencyService(nil), SSEPingFormatNone, 0),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"claude-3-5-sonnet","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "python-requests/2")
+	ctx := service.WithInboundUserAgent(req.Context(), "python-requests/2")
+	ctx = context.WithValue(ctx, ctxkey.Group, group)
+	c.Request = req.WithContext(ctx)
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		ID:      8,
+		UserID:  3,
+		GroupID: &groupID,
+		User:    &service.User{ID: 3, Status: service.StatusActive},
+		Group:   group,
+	})
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 3, Concurrency: 0})
+
+	h.Responses(c)
+
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	require.Equal(t, "forbidden_error", gjson.Get(rec.Body.String(), "error.type").String())
+	require.Equal(t, "forbidden_error", gjson.Get(rec.Body.String(), "error.code").String())
+	require.Equal(t, service.UserAgentNotAllowedMessage, gjson.Get(rec.Body.String(), "error.message").String())
+	require.NotContains(t, rec.Body.String(), "No available accounts:")
+	require.NotContains(t, rec.Body.String(), "ua_filter")
+}
+
+func TestUserAgentNotAllowedResponsesWebSocketBeforeDial(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	billing := newSimpleBillingForUATest(t)
+	repo := &uaFilterAccountRepoStub{accounts: []service.Account{uaBlockedOpenAIAccount()}}
+	concurrency := service.NewConcurrencyService(nil)
+	gateway := service.NewOpenAIGatewayService(
+		repo, nil, nil, nil, nil, nil, nil, cfg, nil, concurrency,
+		nil, nil, billing, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := NewOpenAIGatewayHandler(gateway, concurrency, billing, &service.APIKeyService{}, nil, nil, nil, nil, cfg)
+
+	groupID := int64(82)
+	group := &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, Hydrated: true}
+	apiKey := &service.APIKey{
+		ID:      82,
+		GroupID: &groupID,
+		User:    &service.User{ID: 8, Status: service.StatusActive},
+		Group:   group,
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 0})
+		ctx := service.WithInboundUserAgent(c.Request.Context(), c.GetHeader("User-Agent"))
+		ctx = context.WithValue(ctx, ctxkey.Group, group)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	})
+	router.GET("/openai/v1/responses", h.ResponsesWebSocket)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+
+	headers := http.Header{}
+	headers.Set("User-Agent", "python-requests/2")
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+	clientConn, _, err := coderws.Dial(
+		dialCtx,
+		"ws"+strings.TrimPrefix(server.URL, "http")+"/openai/v1/responses",
+		&coderws.DialOptions{HTTPHeader: headers},
+	)
+	cancelDial()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientConn.CloseNow() })
+
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
+	err = clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1"}`))
+	cancelWrite()
+	require.NoError(t, err)
+
+	var frames [][]byte
+	var closeErr coderws.CloseError
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		readCtx, cancelRead := context.WithTimeout(context.Background(), time.Until(deadline))
+		_, payload, readErr := clientConn.Read(readCtx)
+		cancelRead()
+		if readErr != nil {
+			require.ErrorAs(t, readErr, &closeErr)
+			break
+		}
+		frames = append(frames, payload)
+	}
+	require.NotEmpty(t, frames)
+	body := string(frames[0])
+	require.Equal(t, "error", gjson.Get(body, "type").String())
+	require.Equal(t, "forbidden_error", gjson.Get(body, "error.type").String())
+	require.Equal(t, service.UserAgentNotAllowedMessage, gjson.Get(body, "error.message").String())
+	require.NotContains(t, body, "ua_filter")
+	require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
+	require.Contains(t, closeErr.Reason, service.UserAgentNotAllowedMessage)
+}
+
+func TestUserAgentNotAllowedLive(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", nil)
+
+	(&OpenAIGatewayHandler{}).writeLiveCreateError(c, fmt.Errorf("select: %w", service.ErrUserAgentNotAllowed))
+
+	requireUserAgentForbiddenOpenAI(t, rec)
+}
+
+func TestUserAgentNotAllowedCodexModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(83)
+	group := &service.Group{
+		ID:       groupID,
+		Platform: service.PlatformOpenAI,
+		Status:   service.StatusActive,
+		Hydrated: true,
+		CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{
+			Enabled:             true,
+			FallbackToScheduler: true,
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	gateway := service.NewOpenAIGatewayService(
+		&uaFilterAccountRepoStub{accounts: []service.Account{uaBlockedOpenAIAccount()}},
+		nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := &OpenAIGatewayHandler{gatewayService: gateway}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.144.0", nil)
+	c.Request = req.WithContext(service.WithInboundUserAgent(req.Context(), "python-requests/2"))
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{GroupID: &groupID, Group: group})
+
+	h.CodexModels(c)
+	requireUserAgentForbiddenOpenAI(t, rec)
+}
+
+func TestUserAgentNotAllowedPinnedOpenAIModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(84)
+	group := &service.Group{
+		ID:       groupID,
+		Platform: service.PlatformOpenAI,
+		Status:   service.StatusActive,
+		Hydrated: true,
+		CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{
+			Enabled:             true,
+			FallbackToScheduler: true,
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	gateway := service.NewOpenAIGatewayService(
+		&uaFilterAccountRepoStub{accounts: []service.Account{uaBlockedOpenAIAccount()}},
+		nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := &GatewayHandler{openAIGatewayService: gateway, maxAccountSwitches: 3}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Request = req.WithContext(service.WithInboundUserAgent(req.Context(), "python-requests/2"))
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{GroupID: &groupID, Group: group})
+
+	h.Models(c)
+	requireUserAgentForbiddenOpenAI(t, rec)
+}
+
+type uaFilterStatusUpstream struct {
+	status int
+	calls  int
+}
+
+func (u *uaFilterStatusUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	u.calls++
+	return &http.Response{
+		StatusCode: u.status,
+		Status:     http.StatusText(u.status),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"upstream unavailable","type":"upstream_error"}}`)),
+		Request:    req,
+	}, nil
+}
+
+func (u *uaFilterStatusUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+type uaFilterTempUnschedRepo struct {
+	uaFilterAccountRepoStub
+}
+
+func (uaFilterTempUnschedRepo) SetTempUnschedulable(context.Context, int64, time.Time, string) error {
+	return nil
+}
+
+func TestUserAgentNotAllowedGrokVoiceAfterUpstreamFailure(t *testing.T) {
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	billing := newSimpleBillingForUATest(t)
+	upstream := &uaFilterStatusUpstream{status: http.StatusBadGateway}
+	repo := &uaFilterTempUnschedRepo{uaFilterAccountRepoStub: uaFilterAccountRepoStub{accounts: []service.Account{
+		uaAllowedGrokAccount(),
+		uaBlockedGrokAccount(),
+	}}}
+	concurrency := service.NewConcurrencyService(nil)
+	gateway := service.NewOpenAIGatewayService(
+		repo, nil, nil, nil, nil, nil, nil, cfg, nil, concurrency,
+		nil, nil, billing, upstream,
+		nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	h := NewOpenAIGatewayHandler(gateway, concurrency, billing, &service.APIKeyService{}, nil, nil, nil, nil, cfg)
+	c, rec := newUAGrokAudioContext("python-requests/2", http.MethodPost, "/v1/tts", `{"input":"hello"}`)
+
+	h.GrokVoice(c, "stt")
+
+	require.Equal(t, 1, upstream.calls)
+	require.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), service.UserAgentNotAllowedMessage)
+	require.NotContains(t, rec.Body.String(), "forbidden_error")
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
 }

@@ -49,6 +49,10 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 				return
 			}
 			if !apiKey.Group.CodexModelsManifestConfig.FallbackToScheduler {
+				if status, errType, message, ok := userAgentNotAllowedResponse(pinnedErr); ok {
+					h.errorResponse(c, status, errType, message)
+					return
+				}
 				if errors.Is(pinnedErr, service.ErrNoPinnedCodexModelsAccounts) {
 					h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available pinned OpenAI accounts")
 					return
@@ -104,6 +108,12 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 		if err != nil {
 			if c.Request.Context().Err() != nil {
 				return
+			}
+			if lastUpstreamErr == nil {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.errorResponse(c, status, errType, message)
+					return
+				}
 			}
 			if lastUpstreamErr != nil {
 				h.errorResponse(c, infraerrors.Code(lastUpstreamErr), "upstream_error", infraerrors.Message(lastUpstreamErr))
