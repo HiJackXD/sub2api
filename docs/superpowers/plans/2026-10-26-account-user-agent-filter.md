@@ -833,18 +833,30 @@ git commit -m "feat: record inbound user-agent on api key requests"
 - Consumes: `userAgentBlocksCandidate`, `uaFilterStats.errorOr`, `cache.DeleteSessionAccountID`
 - Produces: `SelectAccountWithLoadAwareness`, `selectAccountForModelWithPlatform`, and `selectAccountWithMixedScheduling` obey the four selection outcomes
 
-The required local pattern, used only after platform and model checks have succeeded and before quota, RPM, window cost, concurrency, or schedulable checks:
+For an ordinary candidate, after platform and model checks have succeeded and before quota, RPM, window cost, concurrency, or schedulable checks:
 
 ```go
 if userAgentBlocksCandidate(ctx, account, &uaStats) {
-	if sessionHash != "" && s.cache != nil {
-		_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-	}
 	continue
 }
 ```
 
-On a sticky hit, use the same block but `return` into the normal candidate loop instead of selecting that account. Delete the binding only when the blocked account is the sticky account. Do not delete a binding when a different candidate is blocked.
+Do not delete a session binding here. A blocked non-sticky candidate must not clear the session.
+
+For a sticky hit, after the same platform and model checks and before slot acquisition:
+
+```go
+if userAgentBlocksCandidate(ctx, account, &uaStats) {
+	if sessionHash != "" && s.cache != nil && account.ID == stickyAccountID {
+		_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+	}
+	// Do not select this account. Fall through to the normal candidate loop.
+} else if the existing sticky checks pass {
+	// existing sticky selection
+}
+```
+
+Delete the binding only when the blocked account is the current sticky account.
 
 Before every existing `return nil, ErrNoAvailableAccounts` or wrapped model-unavailable error that is reached after candidate evaluation, return `uaStats.errorOr(existingErr)` only when `uaStats.candidates > 0`. When the loaded account list is empty before model filtering, keep the existing error unchanged. A channel-pricing or composite-route failure that happens before accounts are loaded also stays unchanged.
 
