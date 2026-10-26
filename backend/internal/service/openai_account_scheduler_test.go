@@ -49,6 +49,9 @@ func (r schedulerTestOpenAIAccountRepo) ListSchedulableByGroupID(ctx context.Con
 }
 
 func (r schedulerTestOpenAIAccountRepo) ListModelAvailabilityCandidates(ctx context.Context, groupID *int64, _ []string, _ bool) ([]Account, error) {
+	if groupID == nil {
+		return append([]Account(nil), r.accounts...), nil
+	}
 	return r.ListSchedulableByGroupID(ctx, *groupID)
 }
 

@@ -44,6 +44,10 @@ func (s *uaFilterAccountRepoStub) ListSchedulableByPlatform(_ context.Context, p
 	return s.matching([]string{platform}), nil
 }
 
+func (s *uaFilterAccountRepoStub) ListModelAvailabilityCandidates(_ context.Context, _ *int64, platforms []string, _ bool) ([]service.Account, error) {
+	return s.matching(platforms), nil
+}
+
 func (s *uaFilterAccountRepoStub) matching(platforms []string) []service.Account {
 	allowed := make(map[string]struct{}, len(platforms))
 	for _, platform := range platforms {

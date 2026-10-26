@@ -202,11 +202,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
-			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
-				h.handleStreamingAwareError(c, status, errType, message, streamStarted)
-				return
-			}
 			if len(failedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+					return
+				}
 				cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
 				cls = classifySelectionFailureError(err, cls)
 				if !cls.ModelNotFound {

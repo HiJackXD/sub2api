@@ -353,11 +353,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					reqLog.Info("gateway.account_select_aborted_client_disconnected", zap.Error(err))
 					return
 				}
-				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
-					h.handleStreamingAwareError(c, status, errType, message, streamStarted)
-					return
-				}
 				if len(fs.FailedAccountIDs) == 0 {
+					if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+						h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+						return
+					}
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, service.PlatformGemini)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -691,11 +691,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					reqLog.Info("gateway.account_select_aborted_client_disconnected", zap.Error(err))
 					return
 				}
-				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
-					h.handleStreamingAwareError(c, status, errType, message, streamStarted)
-					return
-				}
 				if len(fs.FailedAccountIDs) == 0 {
+					if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+						h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+						return
+					}
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)

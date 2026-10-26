@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -443,9 +444,6 @@ func openAIUserAgentCandidateFailureReason(ctx context.Context, account *Account
 	if account.Platform != platform || !account.IsOpenAICompatible() {
 		return "platform_mismatch"
 	}
-	if !account.IsSchedulable() {
-		return "not_schedulable"
-	}
 	if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
 		return "model_not_supported"
 	}
@@ -463,8 +461,9 @@ func openAIUserAgentCandidateFailureReason(ctx context.Context, account *Account
 }
 
 // openAIModelRateLimitFailureReason reports a model-scoped cooldown on an
-// otherwise schedulable account. Account-level unschedulability stays outside
-// the User-Agent candidate set.
+// otherwise schedulable account. Account-level IsSchedulable failures are
+// reported by openAITransientQuotaAndModelRateLimitReason after the User-Agent
+// rule so a temporary block cannot hide that decision.
 func openAIModelRateLimitFailureReason(ctx context.Context, account *Account, requestedModel string) string {
 	if account == nil || !account.IsSchedulable() {
 		return ""
@@ -481,6 +480,9 @@ func openAIModelRateLimitFailureReason(ctx context.Context, account *Account, re
 func openAITransientQuotaAndModelRateLimitReason(ctx context.Context, account *Account, requestedModel string) string {
 	if account == nil {
 		return ""
+	}
+	if !account.IsSchedulable() {
+		return "not_schedulable"
 	}
 	if reason := openAIModelRateLimitFailureReason(ctx, account, requestedModel); reason != "" {
 		return reason
@@ -969,7 +971,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 	ctx, uaStats := withUAFilterStats(ctx)
 	defer func() {
 		if err != nil {
-			err = uaStats.errorOr(err)
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact)
 		}
 	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
@@ -1292,7 +1294,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	ctx, uaStats := withUAFilterStats(ctx)
 	defer func() {
 		if err != nil {
-			err = uaStats.errorOr(err)
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact)
 		}
 	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
@@ -1674,6 +1676,46 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		return nil, ErrNoAvailableCompactAccounts
 	}
 	return nil, ErrNoAvailableAccounts
+}
+
+// confirmOpenAIUserAgentDenial replaces ErrUserAgentNotAllowed with the
+// existing no-account error when a persistently configured account would
+// accept the client. Model and platform misses stay out of that set.
+func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context, stats *uaFilterStats, existing error, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) error {
+	if stats == nil {
+		return existing
+	}
+	decided := stats.errorOr(existing)
+	if !errors.Is(decided, ErrUserAgentNotAllowed) || s == nil || s.accountRepo == nil {
+		return decided
+	}
+	userAgent, enforced := InboundUserAgentFromContext(ctx)
+	if !enforced {
+		return decided
+	}
+	platform = NormalizeOpenAICompatiblePlatform(platform)
+	simpleMode := s.cfg != nil && s.cfg.RunMode == config.RunModeSimple
+	accounts, err := loadPersistentUserAgentCandidates(ctx, s.accountRepo, groupID, []string{platform}, userAgentAvailabilityIncludesGrouped(groupID, simpleMode))
+	if err != nil {
+		return decided
+	}
+	keep := openAIUserAgentAvailabilityKeep(platform, requestedModel, excludedIDs, requireCompact)
+	return stats.errorOrUnlessPersistentAllows(existing, userAgent, accounts, keep)
+}
+
+func openAIUserAgentAvailabilityKeep(platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) func(*Account) bool {
+	return func(account *Account) bool {
+		if account == nil || account.Platform != platform || !account.IsOpenAICompatible() {
+			return false
+		}
+		if _, excluded := excludedIDs[account.ID]; excluded {
+			return false
+		}
+		if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
+			return false
+		}
+		return true
+	}
 }
 
 func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, groupID *int64, platform string) ([]Account, error) {

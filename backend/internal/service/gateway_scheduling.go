@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	mathrand "math/rand"
@@ -763,9 +764,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				"model", requestedModel,
 				"restricted_accounts", channelRestrictedCount,
 				"total_accounts", len(accounts))
-			return nil, uaStats.errorOr(fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel))
+			return nil, s.finishGatewayUserAgentError(ctx, uaStats, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel), groupID, platform, requestedModel, excludedIDs, useMixed)
 		}
-		return nil, uaStats.errorOr(ErrNoAvailableAccounts)
+		return nil, s.finishGatewayUserAgentError(ctx, uaStats, ErrNoAvailableAccounts, groupID, platform, requestedModel, excludedIDs, useMixed)
 	}
 
 	accountLoads := make([]AccountWithConcurrency, 0, len(candidates))
@@ -853,7 +854,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
 	}
-	return nil, uaStats.errorOr(ErrNoAvailableAccounts)
+	return nil, s.finishGatewayUserAgentError(ctx, uaStats, ErrNoAvailableAccounts, groupID, platform, requestedModel, excludedIDs, useMixed)
 }
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool, bindSticky bool) (*AccountSelectionResult, bool, error) {
@@ -1214,6 +1215,45 @@ func (s *GatewayService) isAccountSchedulableForSelection(account *Account) bool
 		return false
 	}
 	return account.IsSchedulable()
+}
+
+// finishGatewayUserAgentError confirms a User-Agent denial against accounts
+// that scheduling queries omit for rate limit, overload, or temporary
+// unschedulability. A model or platform miss is not a passing account.
+func (s *GatewayService) finishGatewayUserAgentError(ctx context.Context, stats uaFilterStats, existing error, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, useMixed bool) error {
+	decided := stats.errorOr(existing)
+	if !errors.Is(decided, ErrUserAgentNotAllowed) || s == nil || s.accountRepo == nil {
+		return decided
+	}
+	userAgent, enforced := InboundUserAgentFromContext(ctx)
+	if !enforced {
+		return decided
+	}
+	platforms := []string{platform}
+	if useMixed {
+		platforms = []string{platform, PlatformAntigravity}
+	}
+	simpleMode := s.cfg != nil && s.cfg.RunMode == config.RunModeSimple
+	accounts, err := loadPersistentUserAgentCandidates(ctx, s.accountRepo, groupID, platforms, userAgentAvailabilityIncludesGrouped(groupID, simpleMode))
+	if err != nil {
+		return decided
+	}
+	return stats.errorOrUnlessPersistentAllows(existing, userAgent, accounts, s.gatewayUserAgentAvailabilityKeep(ctx, platform, requestedModel, excludedIDs, useMixed))
+}
+
+func (s *GatewayService) gatewayUserAgentAvailabilityKeep(ctx context.Context, platform, requestedModel string, excludedIDs map[int64]struct{}, useMixed bool) func(*Account) bool {
+	return func(account *Account) bool {
+		if account == nil || !s.isAccountAllowedForPlatform(account, platform, useMixed) {
+			return false
+		}
+		if _, excluded := excludedIDs[account.ID]; excluded {
+			return false
+		}
+		if requestedModel != "" && !s.isModelSupportedByAccountWithContext(ctx, account, requestedModel) {
+			return false
+		}
+		return true
+	}
 }
 
 func (s *GatewayService) isAccountSchedulableForModelSelection(ctx context.Context, account *Account, requestedModel string) bool {
@@ -2238,9 +2278,9 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, false)
 		if requestedModel != "" {
-			return nil, uaStats.errorOr(fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats)))
+			return nil, s.finishGatewayUserAgentError(ctx, uaStats, fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats)), groupID, platform, requestedModel, excludedIDs, false)
 		}
-		return nil, uaStats.errorOr(ErrNoAvailableAccounts)
+		return nil, s.finishGatewayUserAgentError(ctx, uaStats, ErrNoAvailableAccounts, groupID, platform, requestedModel, excludedIDs, false)
 	}
 
 	// 4. 建立粘性绑定
@@ -2540,9 +2580,9 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, nativePlatform, accounts, excludedIDs, true)
 		if requestedModel != "" {
-			return nil, uaStats.errorOr(fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats)))
+			return nil, s.finishGatewayUserAgentError(ctx, uaStats, fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats)), groupID, nativePlatform, requestedModel, excludedIDs, true)
 		}
-		return nil, uaStats.errorOr(ErrNoAvailableAccounts)
+		return nil, s.finishGatewayUserAgentError(ctx, uaStats, ErrNoAvailableAccounts, groupID, nativePlatform, requestedModel, excludedIDs, true)
 	}
 
 	// 4. 建立粘性绑定

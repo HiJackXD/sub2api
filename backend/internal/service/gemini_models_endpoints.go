@@ -95,7 +95,9 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelsEndpoints(ctx contex
 
 	if selected == nil {
 		if err := uaStats.errorOr(nil); err != nil {
-			return nil, err
+			if !s.persistentGeminiCandidateAllows(ctx, groupID, PlatformGemini, "", nil, false) {
+				return nil, err
+			}
 		}
 		return nil, errors.New("no available Gemini accounts")
 	}

@@ -185,6 +185,27 @@ func TestSelectAccountForModelWithPlatform_NonStickyUserAgentKeepsSession(t *tes
 	require.Zero(t, cache.deletedSessions["sess"])
 }
 
+func TestSelectAccountForModelWithPlatform_RateLimitedAccountKeepsNoAccountError(t *testing.T) {
+	resetAt := time.Now().Add(time.Hour)
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true, RateLimitResetAt: &resetAt},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 2, Status: StatusActive, Schedulable: true, Extra: map[string]any{
+				"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"},
+			}},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+	svc := &GatewayService{accountRepo: repo, cache: &mockGatewayCacheForPlatform{}, cfg: testConfig()}
+	_, err := svc.selectAccountForModelWithPlatform(WithInboundUserAgent(context.Background(), "python-requests/2.32"), nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.False(t, errors.Is(err, ErrUserAgentNotAllowed))
+}
+
 func TestSelectAccountForModelWithPlatform_OtherPlatformIsNotUserAgentFailure(t *testing.T) {
 	repo := &mockAccountRepoForPlatform{
 		accounts: []Account{{

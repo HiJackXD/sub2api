@@ -274,6 +274,47 @@ func TestOpenAIUserAgent_AllTemporarilyUnavailableAndBlocked(t *testing.T) {
 	require.False(t, errors.Is(err, ErrNoAvailableAccounts))
 }
 
+func TestOpenAIUserAgent_RateLimitedAccountKeepsNoAccountError(t *testing.T) {
+	groupID := int64(79)
+	resetAt := time.Now().Add(time.Hour)
+	open := Account{
+		ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Schedulable: true, Concurrency: 1, Priority: 1, GroupIDs: []int64{groupID},
+		RateLimitResetAt: &resetAt,
+	}
+	blocked := open
+	blocked.ID = 2
+	blocked.Priority = 2
+	blocked.RateLimitResetAt = nil
+	blocked.Extra = map[string]any{"ua_filter_mode": "allow", "ua_filter_patterns": []string{"codex_cli_rs/"}}
+	accounts := []Account{open, blocked}
+	pointers := []*Account{&accounts[0], &accounts[1]}
+	svc := &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cache:              &schedulerTestGatewayCache{},
+		cfg:                &config.Config{RunMode: config.RunModeStandard},
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
+		schedulerSnapshot:  &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{snapshotAccounts: pointers, accountsByID: map[int64]*Account{1: pointers[0], 2: pointers[1]}}},
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+	}
+	ctx := WithInboundUserAgent(context.Background(), "python-requests/2.32")
+	_, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.False(t, errors.Is(err, ErrUserAgentNotAllowed))
+
+	// The snapshot list above keeps RateLimitResetAt accounts. Production
+	// schedulable queries drop them, so the selector iterates only the
+	// allow-list account. Availability candidates still include the open one.
+	var seen uaFilterStats
+	seen.noteCandidate()
+	seen.noteFail()
+	existing := noAvailableOpenAISelectionError("gpt-5.1", false, "")
+	confirmed := seen.errorOrUnlessPersistentAllows(existing, "python-requests/2.32", []Account{open, blocked}, openAIUserAgentAvailabilityKeep(PlatformOpenAI, "gpt-5.1", nil, false))
+	require.ErrorIs(t, confirmed, ErrNoAvailableAccounts)
+	require.False(t, errors.Is(confirmed, ErrUserAgentNotAllowed))
+}
+
 func TestOpenAIUserAgent_StatsPointer(t *testing.T) {
 	account := &Account{ID: 9, Extra: map[string]any{
 		"ua_filter_mode": "block", "ua_filter_patterns": []string{"python-requests"},

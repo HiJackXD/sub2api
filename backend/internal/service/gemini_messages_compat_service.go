@@ -136,12 +136,14 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 
 	// 3. 查询可调度账户（强制平台模式：优先按分组查找，找不到再查全部）
 	// Query schedulable accounts (force platform mode: try group first, fallback to all)
-	accounts, err := s.listSchedulableAccountsOnce(ctx, groupID, platform, hasForcePlatform)
+	queryGroupID := groupID
+	accounts, err := s.listSchedulableAccountsOnce(ctx, queryGroupID, platform, hasForcePlatform)
 	if err != nil {
 		return nil, fmt.Errorf("query accounts failed: %w", err)
 	}
 	// 强制平台模式下，分组中找不到账户时回退查询全部
 	if len(accounts) == 0 && groupID != nil && hasForcePlatform {
+		queryGroupID = nil
 		accounts, err = s.listSchedulableAccountsOnce(ctx, nil, platform, hasForcePlatform)
 		if err != nil {
 			return nil, fmt.Errorf("query accounts failed: %w", err)
@@ -151,6 +153,9 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 	// 4. 按优先级 + LRU 选择最佳账号
 	// Select best account by priority + LRU
 	selected, err := s.selectBestGeminiAccount(ctx, accounts, requestedModel, excludedIDs, platform, useMixedScheduling)
+	if errors.Is(err, ErrUserAgentNotAllowed) && s.persistentGeminiCandidateAllows(ctx, queryGroupID, platform, requestedModel, excludedIDs, useMixedScheduling) {
+		selected, err = nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -414,6 +419,36 @@ func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 		return nil, uaStats.errorOr(nil)
 	}
 	return selected, nil
+}
+
+// persistentGeminiCandidateAllows reports whether an account omitted by the
+// schedulable query for transient runtime state would accept the User-Agent.
+func (s *GeminiMessagesCompatService) persistentGeminiCandidateAllows(ctx context.Context, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, useMixed bool) bool {
+	if s == nil || s.accountRepo == nil {
+		return false
+	}
+	userAgent, enforced := InboundUserAgentFromContext(ctx)
+	if !enforced {
+		return false
+	}
+	platforms := []string{platform}
+	if useMixed {
+		platforms = append(platforms, PlatformAntigravity)
+	}
+	simpleMode := s.cfg != nil && s.cfg.RunMode == config.RunModeSimple
+	accounts, err := loadPersistentUserAgentCandidates(ctx, s.accountRepo, groupID, platforms, userAgentAvailabilityIncludesGrouped(groupID, simpleMode))
+	if err != nil {
+		return false
+	}
+	return persistentCandidateAllowsUserAgent(accounts, userAgent, func(account *Account) bool {
+		if account == nil {
+			return false
+		}
+		if _, excluded := excludedIDs[account.ID]; excluded {
+			return false
+		}
+		return s.geminiAccountMatchesPlatformAndModel(account, requestedModel, platform, useMixed)
+	})
 }
 
 func (s *GeminiMessagesCompatService) buildPreCheckUsageResultMap(ctx context.Context, accounts []Account, requestedModel string) map[int64]bool {

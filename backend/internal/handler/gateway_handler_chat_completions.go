@@ -196,11 +196,11 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				reqLog.Info("gateway.cc.account_select_aborted_client_disconnected", zap.Error(err))
 				return
 			}
-			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
-				h.chatCompletionsErrorResponse(c, status, errType, message)
-				return
-			}
 			if len(fs.FailedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					h.chatCompletionsErrorResponse(c, status, errType, message)
+					return
+				}
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, groupPlatform)
 				cls = classifySelectionFailureError(err, cls)
 				if !cls.ModelNotFound {

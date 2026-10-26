@@ -5,8 +5,10 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -59,6 +61,14 @@ func TestAccountAllowsInboundUserAgent(t *testing.T) {
 			"ua_filter_mode":     "allow",
 			"ua_filter_patterns": []string{"codex desktop"},
 		}, ua: "python-codex-script/1", allowed: false},
+		{name: "padded allow mode", extra: map[string]any{
+			"ua_filter_mode":     " allow",
+			"ua_filter_patterns": []string{"claude-cli/"},
+		}, ua: "claude-cli/2.1.1", allowed: true},
+		{name: "padded off mode", extra: map[string]any{
+			"ua_filter_mode":     " off",
+			"ua_filter_patterns": []string{"claude-cli/"},
+		}, ua: "python-requests/2.32", allowed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,15 +164,39 @@ func TestNormalizeUserAgentFilterExtra(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	tooMany := make([]any, 51)
-	for i := range tooMany {
-		tooMany[i] = "curl"
+	duplicates := make([]any, 51)
+	for i := range duplicates {
+		duplicates[i] = "curl"
+	}
+	normalized, clear, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "block",
+		"ua_filter_patterns": duplicates,
+	})
+	require.NoError(t, err)
+	require.False(t, clear)
+	require.Equal(t, []string{"curl"}, normalized["ua_filter_patterns"])
+
+	unique := make([]any, 51)
+	for i := range unique {
+		unique[i] = strings.Repeat("p", 3) + strings.Repeat("x", i)
 	}
 	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{
 		"ua_filter_mode":     "block",
-		"ua_filter_patterns": tooMany,
+		"ua_filter_patterns": unique,
 	})
 	require.Error(t, err)
+
+	tooLarge := make([]any, 1001)
+	for i := range tooLarge {
+		tooLarge[i] = "curl"
+	}
+	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "block",
+		"ua_filter_patterns": tooLarge,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "too large")
+	require.NotContains(t, err.Error(), "at least one pattern")
 
 	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{
 		"ua_filter_mode":     "block",
@@ -177,4 +211,30 @@ func TestNormalizeUserAgentFilterExtra(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, clear)
 	require.Equal(t, []string{"Claude-CLI/", "opencode/"}, normalized["ua_filter_patterns"])
+}
+
+func TestPersistentCandidateAllowsUserAgentOverridesSentinel(t *testing.T) {
+	t.Parallel()
+	resetAt := time.Now().Add(time.Hour)
+	rateLimited := Account{
+		ID: 1, Platform: PlatformAnthropic, Status: StatusActive, Schedulable: true,
+		RateLimitResetAt: &resetAt,
+	}
+	blocked := Account{
+		ID: 2, Platform: PlatformAnthropic, Status: StatusActive, Schedulable: true,
+		Extra: map[string]any{"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"}},
+	}
+	var stats uaFilterStats
+	stats.noteCandidate()
+	stats.noteFail()
+	existing := fmt.Errorf("%w supporting model: claude", ErrNoAvailableAccounts)
+	keep := func(account *Account) bool {
+		return account != nil && account.Platform == PlatformAnthropic && account.ID != 9
+	}
+	err := stats.errorOrUnlessPersistentAllows(existing, "python-requests/2.32", []Account{rateLimited, blocked}, keep)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.False(t, errors.Is(err, ErrUserAgentNotAllowed))
+
+	err = stats.errorOrUnlessPersistentAllows(existing, "python-requests/2.32", []Account{blocked}, keep)
+	require.ErrorIs(t, err, ErrUserAgentNotAllowed)
 }

@@ -21,6 +21,9 @@ const (
 	UserAgentNotAllowedMessage = "No available account accepts this User-Agent"
 	uaFilterInvalidMode        = "invalid"
 	uaFilterLogMaxBytes        = 256
+	// uaFilterPatternInputLimit rejects a raw list before normalization.
+	// The spec's 50-pattern cap is applied after trim and case-insensitive dedupe.
+	uaFilterPatternInputLimit = 1000
 )
 
 var ErrUserAgentNotAllowed = errors.New(UserAgentNotAllowedMessage)
@@ -85,7 +88,8 @@ func (a *Account) UserAgentFilterMode() string {
 		return UAFilterModeOff
 	}
 	raw, ok := a.Extra[UAFilterExtraModeKey].(string)
-	if !ok || strings.TrimSpace(raw) == "" || raw == UAFilterModeOff {
+	raw = strings.TrimSpace(raw)
+	if !ok || raw == "" || raw == UAFilterModeOff {
 		return UAFilterModeOff
 	}
 	if raw == UAFilterModeAllow || raw == UAFilterModeBlock {
@@ -206,8 +210,8 @@ func normalizeUAFilterPatternInput(raw any) ([]string, error) {
 	default:
 		return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns must contain at least one pattern when ua_filter_mode is allow or block")
 	}
-	if len(items) > 50 {
-		return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns must contain at least one pattern when ua_filter_mode is allow or block")
+	if len(items) > uaFilterPatternInputLimit {
+		return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns list is too large")
 	}
 	seen := make(map[string]struct{}, len(items))
 	out := make([]string, 0, len(items))
@@ -303,6 +307,47 @@ func (s uaFilterStats) errorOr(existing error) error {
 		return ErrUserAgentNotAllowed
 	}
 	return existing
+}
+
+// errorOrUnlessPersistentAllows keeps the existing no-account error when a
+// persistently configured account would accept the User-Agent. Schedulable
+// list queries drop rate-limited, overloaded, and temporarily unschedulable
+// accounts before the rule, so those accounts are absent from the counted set.
+func (s uaFilterStats) errorOrUnlessPersistentAllows(existing error, userAgent string, accounts []Account, keep func(*Account) bool) error {
+	decided := s.errorOr(existing)
+	if !errors.Is(decided, ErrUserAgentNotAllowed) {
+		return decided
+	}
+	if persistentCandidateAllowsUserAgent(accounts, userAgent, keep) {
+		return existing
+	}
+	return decided
+}
+
+func userAgentAvailabilityIncludesGrouped(groupID *int64, simpleMode bool) bool {
+	return groupID != nil || simpleMode
+}
+
+func loadPersistentUserAgentCandidates(ctx context.Context, repo AccountRepository, groupID *int64, platforms []string, includeGrouped bool) ([]Account, error) {
+	if repo == nil || len(platforms) == 0 {
+		return nil, nil
+	}
+	return repo.ListModelAvailabilityCandidates(ctx, groupID, platforms, includeGrouped)
+}
+
+// persistentCandidateAllowsUserAgent reports whether any availability-list
+// account that matches platform, model, and exclusion would accept userAgent.
+func persistentCandidateAllowsUserAgent(accounts []Account, userAgent string, keep func(*Account) bool) bool {
+	for i := range accounts {
+		account := &accounts[i]
+		if keep != nil && !keep(account) {
+			continue
+		}
+		if account.AllowsInboundUserAgent(userAgent) {
+			return true
+		}
+	}
+	return false
 }
 
 type uaFilterStatsContextKey struct{}

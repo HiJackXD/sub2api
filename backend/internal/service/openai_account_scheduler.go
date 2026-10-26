@@ -1411,7 +1411,9 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 ) (_ *AccountSelectionResult, _ int, _ int, _ float64, err error) {
 	ctx, uaStats := withUAFilterStats(ctx)
 	defer func() {
-		if err != nil {
+		if err != nil && s != nil && s.service != nil {
+			err = s.service.confirmOpenAIUserAgentDenial(ctx, uaStats, err, req.GroupID, req.Platform, req.RequestedModel, req.ExcludedIDs, req.RequireCompact)
+		} else if err != nil {
 			err = uaStats.errorOr(err)
 		}
 	}()
@@ -1463,10 +1465,6 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 				continue
 			}
 		}
-		if !account.IsSchedulable() {
-			filterStats.exclude("not_schedulable")
-			continue
-		}
 		if account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() {
 			filterStats.exclude("platform_mismatch")
 			continue
@@ -1480,6 +1478,12 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 		if compatible, reason := s.isAccountRequestCompatibleReason(ctx, account, req); !compatible {
 			filterStats.exclude(reason)
+			continue
+		}
+		// Rate limit, overload, and temporary unschedulability run after the
+		// User-Agent rule. A model or platform miss already continued above.
+		if !account.IsSchedulable() {
+			filterStats.exclude("not_schedulable")
 			continue
 		}
 		if !s.isAccountTransportCompatible(account, req.RequiredTransport) {

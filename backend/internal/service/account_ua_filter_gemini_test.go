@@ -201,6 +201,20 @@ func TestGeminiUserAgent_QuotaAfterUserAgent(t *testing.T) {
 	require.Nil(t, selected)
 }
 
+func TestGeminiUserAgent_RateLimitedAccountKeepsGeminiError(t *testing.T) {
+	resetAt := time.Now().Add(time.Hour)
+	svc, _ := newUAGeminiService([]Account{
+		{ID: 1, Platform: PlatformGemini, Priority: 1, Status: StatusActive, Schedulable: true, RateLimitResetAt: &resetAt},
+		{ID: 2, Platform: PlatformGemini, Priority: 2, Status: StatusActive, Schedulable: true, Extra: map[string]any{
+			"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"},
+		}},
+	}, nil)
+	_, err := svc.SelectAccountForModelWithExclusions(WithInboundUserAgent(context.Background(), "python-requests/2"), nil, "", "gemini-2.5-flash", nil)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrUserAgentNotAllowed))
+	require.Contains(t, err.Error(), "no available")
+}
+
 func TestGeminiUserAgent_ModelsEndpointAllBlocked(t *testing.T) {
 	svc, _ := newUAGeminiService([]Account{
 		{ID: 1, Platform: PlatformGemini, Priority: 1, Status: StatusActive, Schedulable: true, Extra: map[string]any{"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"}}},
