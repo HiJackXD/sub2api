@@ -971,7 +971,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 	ctx, uaStats := withUAFilterStats(ctx)
 	defer func() {
 		if err != nil {
-			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact)
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, false)
 		}
 	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
@@ -1294,7 +1294,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	ctx, uaStats := withUAFilterStats(ctx)
 	defer func() {
 		if err != nil {
-			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact)
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, false)
 		}
 	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
@@ -1679,9 +1679,14 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 }
 
 // confirmOpenAIUserAgentDenial replaces ErrUserAgentNotAllowed with the
-// existing no-account error when a persistently configured account would
-// accept the client. Model and platform misses stay out of that set.
-func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context, stats *uaFilterStats, existing error, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) error {
+// existing no-account error when a persistently configured account would have
+// passed this path's pre-count gates and accepted the client. Rate limit,
+// overload, and temporary unschedulability stay out of those gates so they
+// can still clear the sentinel. Legacy confirmation adds capability,
+// composite ownership, and profit. Advanced confirmation adds privacy,
+// composite ownership, and parent health, and leaves capability and profit
+// out because those run after the rule.
+func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context, stats *uaFilterStats, existing error, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, advanced bool) error {
 	if stats == nil {
 		return existing
 	}
@@ -1699,11 +1704,11 @@ func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context,
 	if err != nil {
 		return decided
 	}
-	keep := openAIUserAgentAvailabilityKeep(platform, requestedModel, excludedIDs, requireCompact)
+	keep := s.openAIUserAgentAvailabilityKeep(ctx, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, advanced)
 	return stats.errorOrUnlessPersistentAllows(existing, userAgent, accounts, keep)
 }
 
-func openAIUserAgentAvailabilityKeep(platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) func(*Account) bool {
+func (s *OpenAIGatewayService) openAIUserAgentAvailabilityKeep(ctx context.Context, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, advanced bool) func(*Account) bool {
 	return func(account *Account) bool {
 		if account == nil || account.Platform != platform || !account.IsOpenAICompatible() {
 			return false
@@ -1714,7 +1719,65 @@ func openAIUserAgentAvailabilityKeep(platform, requestedModel string, excludedID
 		if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
 			return false
 		}
+		if advanced {
+			return s.openAIAdvancedUserAgentPreCountPassed(ctx, groupID, account)
+		}
+		if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
+			return false
+		}
+		if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+			if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+				return false
+			}
+		}
+		if vetoed, _ := openAIProfitControlVetoReason(ctx, account); vetoed {
+			return false
+		}
 		return true
+	}
+}
+
+// openAIAdvancedUserAgentPreCountPassed reports the gates the advanced
+// scheduler applies before counting a User-Agent decision. Capability and
+// profit run after that decision, and IsSchedulable stays out so a
+// rate-limited account can still clear the sentinel.
+func (s *OpenAIGatewayService) openAIAdvancedUserAgentPreCountPassed(ctx context.Context, groupID *int64, account *Account) bool {
+	if s != nil && s.openAIGroupRequiresPrivacySet(ctx, groupID) && !account.IsPrivacySet() {
+		return false
+	}
+	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+			return false
+		}
+	}
+	return parentHealthyForShadow(account, s.openAIUserAgentParentLookup(ctx))
+}
+
+// openAIUserAgentParentLookup resolves a shadow parent the same way the
+// advanced scheduler does, without falling through SchedulerSnapshotService.GetAccount
+// when that service has no repository.
+func (s *OpenAIGatewayService) openAIUserAgentParentLookup(ctx context.Context) func(int64) *Account {
+	return func(id int64) *Account {
+		if id <= 0 || s == nil {
+			return nil
+		}
+		if s.schedulerSnapshot != nil {
+			if s.schedulerSnapshot.cache != nil {
+				if account, err := s.schedulerSnapshot.cache.GetAccount(ctx, id); err == nil && account != nil {
+					return account
+				}
+			}
+			if s.schedulerSnapshot.accountRepo != nil {
+				if account, err := s.schedulerSnapshot.accountRepo.GetByID(ctx, id); err == nil && account != nil {
+					return account
+				}
+			}
+		}
+		if s.accountRepo == nil {
+			return nil
+		}
+		account, _ := s.accountRepo.GetByID(ctx, id)
+		return account
 	}
 }
 

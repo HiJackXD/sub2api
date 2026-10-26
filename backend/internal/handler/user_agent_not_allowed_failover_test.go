@@ -462,6 +462,37 @@ func TestUserAgentNotAllowedFailoverWebSearch(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "web_search_error")
 }
 
+func TestUserAgentNotAllowedFailoverGeminiNative(t *testing.T) {
+	groupID := int64(98)
+	group := &service.Group{ID: groupID, Platform: service.PlatformGemini, Status: service.StatusActive, Hydrated: true}
+	open := &service.Account{
+		ID: 1, Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey,
+		Status: service.StatusActive, Schedulable: true, Priority: 1, Concurrency: 1,
+		Credentials:   map[string]any{"api_key": "gem-open"},
+		AccountGroups: []service.AccountGroup{{AccountID: 1, GroupID: groupID}},
+	}
+	blocked := &service.Account{
+		ID: 2, Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey,
+		Status: service.StatusActive, Schedulable: true, Priority: 2, Concurrency: 1,
+		Credentials:   map[string]any{"api_key": "gem-blocked"},
+		Extra:         uaFailoverAllowExtra(),
+		AccountGroups: []service.AccountGroup{{AccountID: 2, GroupID: groupID}},
+	}
+	upstream := &uaFailoverUpstream{status: http.StatusUnauthorized}
+	h, repo, snapshot := newUAFailoverGateway(t, group, []*service.Account{open, blocked}, upstream)
+	h.maxAccountSwitchesGemini = 3
+	h.geminiCompatService = service.NewGeminiMessagesCompatService(repo, nil, nil, snapshot, nil, nil, upstream, nil, h.cfg)
+	c, rec := newUAFailoverContext(t, http.MethodPost, "/v1beta/models/gemini-2.5-flash:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, group, "python-requests/2.32")
+	c.Params = gin.Params{{Key: "modelAction", Value: "/gemini-2.5-flash:generateContent"}}
+
+	h.GeminiV1BetaModels(c)
+
+	require.Equal(t, []int64{1}, upstream.called(), rec.Body.String())
+	requireFailoverNotUserAgentForbidden(t, rec)
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "Upstream authentication failed, please contact administrator")
+}
+
 func TestUserAgentNotAllowedFailoverGrokMedia(t *testing.T) {
 	group := &service.Group{ID: 97, Platform: service.PlatformGrok, Status: service.StatusActive, Hydrated: true, AllowImageGeneration: true}
 	open := service.Account{

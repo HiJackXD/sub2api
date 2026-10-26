@@ -578,9 +578,13 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				reqLog.Info("gemini.account_select_aborted_client_disconnected", zap.Error(err))
 				return
 			}
-			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
-				googleErrorWithType(c, status, errType, "", message)
-				return
+			// 仅首次选号把 User-Agent 哨兵写成 403。已有账号被上游拒绝后，
+			// 下一次选号可能只剩拒绝该客户端的账号；此时沿用耗尽处理。
+			if len(fs.FailedAccountIDs) == 0 {
+				if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+					googleErrorWithType(c, status, errType, "", message)
+					return
+				}
 			}
 			if cachedContentBinding != nil {
 				if fs.LastFailoverErr != nil {
