@@ -45,9 +45,20 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelsEndpoints(ctx contex
 		return nil, errors.New("no available Gemini accounts")
 	}
 
+	var uaStats uaFilterStats
 	var selected *Account
 	for i := range accounts {
 		acc := &accounts[i]
+		// 查询已经限定 Gemini 分组和平台。模型列表没有请求模型。
+		// 空的已生效 User-Agent 会拒绝启用了过滤的账号。
+		// The query already applied group and Gemini platform. This endpoint has
+		// no requested model. An enforced empty User-Agent fails an enabled account.
+		if !s.geminiAccountMatchesPlatformAndModel(acc, "", PlatformGemini, false) {
+			continue
+		}
+		if userAgentBlocksCandidate(ctx, acc, &uaStats) {
+			continue
+		}
 		if selected == nil {
 			selected = acc
 			continue
@@ -83,6 +94,9 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelsEndpoints(ctx contex
 	}
 
 	if selected == nil {
+		if err := uaStats.errorOr(nil); err != nil {
+			return nil, err
+		}
 		return nil, errors.New("no available Gemini accounts")
 	}
 	return s.hydrateSelectedAccount(ctx, selected)
