@@ -1412,7 +1412,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	ctx, uaStats := withUAFilterStats(ctx)
 	defer func() {
 		if err != nil && s != nil && s.service != nil {
-			err = s.service.confirmOpenAIUserAgentDenial(ctx, uaStats, err, req.GroupID, req.Platform, req.RequestedModel, req.ExcludedIDs, req.RequireCompact, req.RequiredCapability, true)
+			err = s.service.confirmOpenAIUserAgentDenial(ctx, uaStats, err, req.GroupID, req.Platform, req.RequestedModel, req.ExcludedIDs, req.RequireCompact, req.RequiredCapability, openAIUserAgentConfirmAdvanced)
 		} else if err != nil {
 			err = uaStats.errorOr(err)
 		}

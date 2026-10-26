@@ -971,7 +971,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 	ctx, uaStats := withUAFilterStats(ctx)
 	defer func() {
 		if err != nil {
-			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, false)
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, openAIUserAgentConfirmSelectBest)
 		}
 	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
@@ -1292,11 +1292,6 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (_ *AccountSelectionResult, err error) {
 	ctx = WithStickyBindingClearedByUserAgent(ctx)
 	ctx, uaStats := withUAFilterStats(ctx)
-	defer func() {
-		if err != nil {
-			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, false)
-		}
-	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -1344,6 +1339,14 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		})
 		return markStickySessionHit(selection, stickyHit), selectErr
 	}
+
+	// Load-batch candidates count capability, composite ownership, and profit
+	// before the User-Agent rule. The batch-off path confirms in the callee.
+	defer func() {
+		if err != nil {
+			err = s.confirmOpenAIUserAgentDenial(ctx, uaStats, err, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, openAIUserAgentConfirmLoadBatch)
+		}
+	}()
 
 	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
 	if err != nil {
@@ -1678,15 +1681,30 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	return nil, ErrNoAvailableAccounts
 }
 
+type openAIUserAgentConfirmMode int
+
+const (
+	// Load-batch selection counts capability, composite ownership, and profit
+	// before the User-Agent rule.
+	openAIUserAgentConfirmLoadBatch openAIUserAgentConfirmMode = iota
+	// The advanced scheduler counts privacy, composite ownership, and parent
+	// health before the rule. Capability and profit run after it.
+	openAIUserAgentConfirmAdvanced
+	// selectBestAccount counts privacy, capability, composite ownership, and
+	// parent health before the rule. Profit and IsSchedulable run after it.
+	openAIUserAgentConfirmSelectBest
+)
+
 // confirmOpenAIUserAgentDenial replaces ErrUserAgentNotAllowed with the
 // existing no-account error when a persistently configured account would have
 // passed this path's pre-count gates and accepted the client. Rate limit,
 // overload, and temporary unschedulability stay out of those gates so they
-// can still clear the sentinel. Legacy confirmation adds capability,
-// composite ownership, and profit. Advanced confirmation adds privacy,
+// can still clear the sentinel. Load-batch confirmation keeps capability,
+// composite ownership, and profit. Advanced confirmation keeps privacy,
 // composite ownership, and parent health, and leaves capability and profit
-// out because those run after the rule.
-func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context, stats *uaFilterStats, existing error, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, advanced bool) error {
+// out because those run after the rule. selectBestAccount confirmation keeps
+// privacy, capability, composite ownership, and parent health.
+func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context, stats *uaFilterStats, existing error, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, mode openAIUserAgentConfirmMode) error {
 	if stats == nil {
 		return existing
 	}
@@ -1704,11 +1722,11 @@ func (s *OpenAIGatewayService) confirmOpenAIUserAgentDenial(ctx context.Context,
 	if err != nil {
 		return decided
 	}
-	keep := s.openAIUserAgentAvailabilityKeep(ctx, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, advanced)
+	keep := s.openAIUserAgentAvailabilityKeep(ctx, groupID, platform, requestedModel, excludedIDs, requireCompact, requiredCapability, mode)
 	return stats.errorOrUnlessPersistentAllows(existing, userAgent, accounts, keep)
 }
 
-func (s *OpenAIGatewayService) openAIUserAgentAvailabilityKeep(ctx context.Context, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, advanced bool) func(*Account) bool {
+func (s *OpenAIGatewayService) openAIUserAgentAvailabilityKeep(ctx context.Context, groupID *int64, platform, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, mode openAIUserAgentConfirmMode) func(*Account) bool {
 	return func(account *Account) bool {
 		if account == nil || account.Platform != platform || !account.IsOpenAICompatible() {
 			return false
@@ -1719,21 +1737,25 @@ func (s *OpenAIGatewayService) openAIUserAgentAvailabilityKeep(ctx context.Conte
 		if requestedModel != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
 			return false
 		}
-		if advanced {
+		switch mode {
+		case openAIUserAgentConfirmAdvanced:
 			return s.openAIAdvancedUserAgentPreCountPassed(ctx, groupID, account)
-		}
-		if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
-			return false
-		}
-		if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
-			if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+		case openAIUserAgentConfirmSelectBest:
+			return s.openAISelectBestUserAgentPreCountPassed(ctx, groupID, account, requiredCapability)
+		default:
+			if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
 				return false
 			}
+			if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+				if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+					return false
+				}
+			}
+			if vetoed, _ := openAIProfitControlVetoReason(ctx, account); vetoed {
+				return false
+			}
+			return true
 		}
-		if vetoed, _ := openAIProfitControlVetoReason(ctx, account); vetoed {
-			return false
-		}
-		return true
 	}
 }
 
@@ -1751,6 +1773,35 @@ func (s *OpenAIGatewayService) openAIAdvancedUserAgentPreCountPassed(ctx context
 		}
 	}
 	return parentHealthyForShadow(account, s.openAIUserAgentParentLookup(ctx))
+}
+
+// openAISelectBestUserAgentPreCountPassed reports the gates selectBestAccount
+// applies before counting a User-Agent decision: privacy, endpoint capability,
+// composite ownership, and parent health. Profit and IsSchedulable run after
+// that decision, so they stay out and a rate-limited account can still clear
+// the sentinel. It does not call openAIAccountPassesStableSelectionGates,
+// because that helper's scheduling-threshold check can park an account that
+// would still accept the client.
+func (s *OpenAIGatewayService) openAISelectBestUserAgentPreCountPassed(ctx context.Context, groupID *int64, account *Account, requiredCapability OpenAIEndpointCapability) bool {
+	if account == nil {
+		return false
+	}
+	if s != nil && groupID != nil && s.openAIGroupRequiresPrivacySet(ctx, groupID) && !account.IsPrivacySet() {
+		return false
+	}
+	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
+		return false
+	}
+	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+			return false
+		}
+	}
+	lookup := func(int64) *Account { return nil }
+	if s != nil {
+		lookup = s.parentAccountLookup(ctx)
+	}
+	return parentHealthyForShadow(account, lookup)
 }
 
 // openAIUserAgentParentLookup resolves a shadow parent the same way the

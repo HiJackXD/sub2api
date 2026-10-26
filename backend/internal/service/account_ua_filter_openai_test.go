@@ -335,6 +335,122 @@ func TestOpenAIUserAgent_IneligibleSiblingDoesNotClearDenial(t *testing.T) {
 	require.ErrorIs(t, err, ErrUserAgentNotAllowed)
 }
 
+func openAISelectBestUserAgentService(accounts []Account, schedulable []*Account) *OpenAIGatewayService {
+	byID := make(map[int64]*Account, len(schedulable))
+	for _, account := range schedulable {
+		if account != nil {
+			byID[account.ID] = account
+		}
+	}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	return &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cache:              &schedulerTestGatewayCache{},
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+		schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{
+			snapshotAccounts: schedulable,
+			accountsByID:     byID,
+		}},
+	}
+}
+
+func assertOpenAISelectBestUserAgent(t *testing.T, svc *OpenAIGatewayService, ctx context.Context, groupID int64, assert func(*testing.T, error)) {
+	t.Helper()
+	t.Run("selectBestAccount", func(t *testing.T) {
+		_, err := svc.selectAccountForModelWithExclusions(ctx, &groupID, PlatformOpenAI, "", "gpt-5.1", nil, false, 0, "", false)
+		assert(t, err)
+	})
+	t.Run("loadAwarenessBatchOff", func(t *testing.T) {
+		_, err := svc.selectAccountWithLoadAwareness(ctx, &groupID, PlatformOpenAI, "", "gpt-5.1", nil, false, "", false)
+		assert(t, err)
+	})
+}
+
+func TestOpenAIUserAgent_SelectBestModeOffPrivacyOrParentMissKeepsDenial(t *testing.T) {
+	rejecting := func(groupID int64) Account {
+		return Account{
+			ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+			Schedulable: true, Concurrency: 1, Priority: 1, GroupIDs: []int64{groupID},
+			Extra: map[string]any{
+				"ua_filter_mode":     "block",
+				"ua_filter_patterns": []string{"python-requests"},
+				"privacy_mode":       PrivacyModeTrainingOff,
+			},
+		}
+	}
+	t.Run("privacy", func(t *testing.T) {
+		groupID := int64(81)
+		blocked := rejecting(groupID)
+		sibling := blocked
+		sibling.ID = 2
+		sibling.Priority = 2
+		sibling.Extra = nil
+		accounts := []Account{blocked, sibling}
+		svc := openAISelectBestUserAgentService(accounts, []*Account{&accounts[0], &accounts[1]})
+		ctx := WithInboundUserAgent(context.Background(), "python-requests/2.32")
+		ctx = context.WithValue(ctx, openAIGroupPrivacyRequirementContextKey{}, openAIGroupPrivacyRequirement{
+			groupID:  groupID,
+			required: true,
+		})
+		assertOpenAISelectBestUserAgent(t, svc, ctx, groupID, func(t *testing.T, err error) {
+			require.ErrorIs(t, err, ErrUserAgentNotAllowed)
+			require.False(t, errors.Is(err, ErrNoAvailableAccounts))
+		})
+	})
+	t.Run("parent_health", func(t *testing.T) {
+		groupID := int64(82)
+		blocked := rejecting(groupID)
+		parentID := int64(99)
+		sibling := blocked
+		sibling.ID = 2
+		sibling.Priority = 2
+		sibling.Extra = nil
+		sibling.ParentAccountID = &parentID
+		accounts := []Account{blocked, sibling}
+		svc := openAISelectBestUserAgentService(accounts, []*Account{&accounts[0], &accounts[1]})
+		ctx := WithInboundUserAgent(context.Background(), "python-requests/2.32")
+		assertOpenAISelectBestUserAgent(t, svc, ctx, groupID, func(t *testing.T, err error) {
+			require.ErrorIs(t, err, ErrUserAgentNotAllowed)
+			require.False(t, errors.Is(err, ErrNoAvailableAccounts))
+		})
+	})
+}
+
+func TestOpenAIUserAgent_SelectBestRateLimitedProfitVetoKeepsNoAccountError(t *testing.T) {
+	groupID := int64(83)
+	resetAt := time.Now().Add(time.Hour)
+	upstream := 4.0
+	accepting := Account{
+		ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Schedulable: true, Concurrency: 1, Priority: 1, GroupIDs: []int64{groupID},
+		RateLimitResetAt: &resetAt,
+		RateMultiplier:   &upstream,
+	}
+	rejecting := accepting
+	rejecting.ID = 2
+	rejecting.Priority = 2
+	rejecting.RateLimitResetAt = nil
+	rejecting.RateMultiplier = nil
+	rejecting.Extra = map[string]any{"ua_filter_mode": "allow", "ua_filter_patterns": []string{"codex_cli_rs/"}}
+	accounts := []Account{accepting, rejecting}
+	// Production schedulable queries drop RateLimitResetAt before selectBestAccount.
+	// Availability candidates still include the account that would accept this client.
+	svc := openAISelectBestUserAgentService(accounts, []*Account{&accounts[1]})
+	ctx := WithInboundUserAgent(context.Background(), "python-requests/2.32")
+	ctx = context.WithValue(ctx, openAIProfitControlGateCtxKey{}, &openAIProfitControlGate{
+		groupID:   groupID,
+		platform:  PlatformOpenAI,
+		threshold: 1,
+	})
+	assertOpenAISelectBestUserAgent(t, svc, ctx, groupID, func(t *testing.T, err error) {
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.False(t, errors.Is(err, ErrUserAgentNotAllowed))
+	})
+}
+
 func TestOpenAIUserAgent_StatsPointer(t *testing.T) {
 	account := &Account{ID: 9, Extra: map[string]any{
 		"ua_filter_mode": "block", "ua_filter_patterns": []string{"python-requests"},
