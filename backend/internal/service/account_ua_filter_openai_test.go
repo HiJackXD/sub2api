@@ -210,6 +210,70 @@ func TestOpenAIUserAgent_LegacyLoadBatchStickyClearDoesNotRebind(t *testing.T) {
 	require.Zero(t, cache.sessionBindings["openai:sess"])
 }
 
+func TestOpenAIUserAgent_AllowedAccountTemporarilyUnavailable(t *testing.T) {
+	groupID := int64(77)
+	// 5h quota auto-pause is the smallest existing fixture that keeps an OpenAI
+	// account schedulable and model-compatible while the initial filter skips it.
+	allowed := Account{
+		ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Schedulable: true, Concurrency: 1, Priority: 1, GroupIDs: []int64{groupID},
+		Extra: map[string]any{
+			"ua_filter_mode":          "allow",
+			"ua_filter_patterns":      []string{"python-requests"},
+			"codex_5h_used_percent":   95.0,
+			"auto_pause_5h_threshold": 0.95,
+		},
+	}
+	blocked := allowed
+	blocked.ID = 2
+	blocked.Priority = 2
+	blocked.Extra = map[string]any{
+		"ua_filter_mode":     "block",
+		"ua_filter_patterns": []string{"python-requests"},
+	}
+	accounts := []Account{allowed, blocked}
+	pointers := []*Account{&accounts[0], &accounts[1]}
+	svc := &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cache:              &schedulerTestGatewayCache{},
+		cfg:                &config.Config{RunMode: config.RunModeStandard},
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
+		schedulerSnapshot:  &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{snapshotAccounts: pointers, accountsByID: map[int64]*Account{1: pointers[0], 2: pointers[1]}}},
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+	}
+	ctx := WithInboundUserAgent(context.Background(), "python-requests/2.32")
+	_, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.False(t, errors.Is(err, ErrUserAgentNotAllowed))
+}
+
+func TestOpenAIUserAgent_AllTemporarilyUnavailableAndBlocked(t *testing.T) {
+	groupID := int64(78)
+	only := Account{
+		ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		Schedulable: true, Concurrency: 1, Priority: 1, GroupIDs: []int64{groupID},
+		Extra: map[string]any{
+			"ua_filter_mode":          "block",
+			"ua_filter_patterns":      []string{"python-requests"},
+			"codex_5h_used_percent":   95.0,
+			"auto_pause_5h_threshold": 0.95,
+		},
+	}
+	account := only
+	svc := &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: []Account{account}},
+		cache:              &schedulerTestGatewayCache{},
+		cfg:                &config.Config{RunMode: config.RunModeStandard},
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
+		schedulerSnapshot:  &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{snapshotAccounts: []*Account{&account}, accountsByID: map[int64]*Account{1: &account}}},
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+	}
+	_, _, err := svc.SelectAccountWithScheduler(WithInboundUserAgent(context.Background(), "python-requests/2.32"), &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.ErrorIs(t, err, ErrUserAgentNotAllowed)
+	require.False(t, errors.Is(err, ErrNoAvailableAccounts))
+}
+
 func TestOpenAIUserAgent_StatsPointer(t *testing.T) {
 	account := &Account{ID: 9, Extra: map[string]any{
 		"ua_filter_mode": "block", "ua_filter_patterns": []string{"python-requests"},
