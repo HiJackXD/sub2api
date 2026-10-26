@@ -204,14 +204,20 @@ func (s *GeminiMessagesCompatService) resolvePlatformAndSchedulingMode(ctx conte
 
 // tryStickySessionHit 尝试从粘性会话获取账号。
 // 命中且通过平台、模型、User-Agent 和暂时可调度检查时返回账号。
-// 账号已不可调度时清理会话。平台或模型不匹配、以及限流或配额未通过时保留绑定。
-// User-Agent 未通过时删除绑定，并标记本请求不要写入替代账号。
+// 账号已不可调度时清理会话。平台和模型仍匹配且 User-Agent 未通过时，标记本请求不要写入替代账号。
+// User-Agent 允许时不标记，回退账号仍会绑定。
+// 平台或模型不匹配、以及可调度账号的限流或配额未通过时保留绑定。
+// 可调度账号的 User-Agent 未通过时删除绑定，并标记本请求不要写入替代账号。
 //
 // tryStickySessionHit attempts to get an account from the sticky session.
 // It returns the account when platform, model, User-Agent, and transient checks pass.
-// An already unschedulable account clears the session. A platform or model miss,
-// and a rate-limit or quota miss, keep the binding. A User-Agent miss deletes the
-// binding and marks this request so the replacement account is not stored.
+// An already unschedulable account clears the session. When that account still
+// matches platform and model and fails the User-Agent rule, this request does
+// not store the replacement. An allowed User-Agent leaves the pointer unset, so
+// the fallback is stored. A platform or model miss, and a rate-limit or quota
+// miss on a schedulable account, keep the binding. A User-Agent miss on a
+// schedulable account deletes the binding and marks this request so the
+// replacement account is not stored.
 func (s *GeminiMessagesCompatService) tryStickySessionHit(
 	ctx context.Context,
 	groupID *int64,
@@ -238,10 +244,23 @@ func (s *GeminiMessagesCompatService) tryStickySessionHit(
 		return nil
 	}
 
-	// 检查账号是否需要清理粘性会话
-	// Check if sticky session should be cleared
+	// 检查账号是否需要清理粘性会话。
+	// 删除后仍判断平台和模型。二者匹配且 User-Agent 拒绝时设置已有指针，本请求不写回退账号。
+	// User-Agent 允许时不设置指针，不可调度的粘性会话仍绑定回退账号。
+	//
+	// Check if sticky session should be cleared.
+	// After the delete, still resolve platform and model. When both match and
+	// the User-Agent rule blocks the account, set the existing cleared pointer
+	// so this request does not store the fallback. An allowed User-Agent leaves
+	// the pointer unset.
 	if shouldClearStickySession(account, requestedModel) {
 		_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), cacheKey)
+		if s.geminiAccountMatchesPlatformAndModel(account, requestedModel, platform, useMixedScheduling) {
+			var stickyUA uaFilterStats
+			if userAgentBlocksCandidate(ctx, account, &stickyUA) {
+				markStickyBindingClearedByUserAgent(ctx)
+			}
+		}
 		return nil
 	}
 

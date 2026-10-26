@@ -59,6 +59,29 @@ func TestGeminiUserAgent_ModelsEndpointSkipsEmptyUA(t *testing.T) {
 	require.Equal(t, int64(2), acc.ID)
 }
 
+func TestGeminiUserAgent_RateLimitedStickyMissDoesNotStoreFallback(t *testing.T) {
+	resetAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	svc, cache := newUAGeminiService([]Account{
+		{
+			ID: 1, Platform: PlatformGemini, Priority: 1, Status: StatusActive, Schedulable: true,
+			Extra: map[string]any{
+				"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"},
+				"model_rate_limits": map[string]any{
+					"gemini-2.5-flash": map[string]any{"rate_limit_reset_at": resetAt},
+				},
+			},
+		},
+		{ID: 2, Platform: PlatformGemini, Priority: 2, Status: StatusActive, Schedulable: true},
+	}, map[string]int64{"gemini:sess": 1})
+	ctx := WithStickyBindingClearedByUserAgent(WithInboundUserAgent(context.Background(), "python-requests/2"))
+	acc, err := svc.SelectAccountForModelWithExclusions(ctx, nil, "sess", "gemini-2.5-flash", nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), acc.ID)
+	_, stillBound := cache.sessionBindings["gemini:sess"]
+	require.False(t, stillBound)
+	require.True(t, stickyBindingClearedByUserAgentRequest(ctx))
+}
+
 func TestGeminiUserAgent_StickyClearDoesNotRebind(t *testing.T) {
 	svc, cache := newUAGeminiService([]Account{
 		{ID: 1, Platform: PlatformGemini, Priority: 1, Status: StatusActive, Schedulable: true, Extra: map[string]any{"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"}}},
