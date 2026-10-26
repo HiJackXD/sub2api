@@ -87,7 +87,6 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		if selectErr != nil || candidate == nil || candidate.Account == nil {
 			break
 		}
-		candidateSeen = true
 		account := candidate.Account
 		var streamStarted bool
 		var slotStatus openAISlotAcquireResult
@@ -107,6 +106,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 			failed[account.ID] = struct{}{}
 			continue
 		}
+		candidateSeen = true
 		probeCtx, cancelProbe := context.WithTimeout(c.Request.Context(), service.DefaultGrokRealtimeDialTimeout)
 		candidateUpstream, openErr := h.gatewayService.OpenGrokRealtime(probeCtx, account, token, model)
 		cancelProbe()
@@ -284,7 +284,6 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			}
 			return
 		}
-		probed = true
 		account := selection.Account
 		var started bool
 		release, status := h.acquireResponsesAccountSlot(c, apiKey.GroupID, "", selection, false, &started, reqLog)
@@ -301,6 +300,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			failed[account.ID] = struct{}{}
 			continue
 		}
+		probed = true
 		result, forwardErr := func() (*service.OpenAIForwardResult, error) {
 			defer release()
 			return h.gatewayService.ForwardGrokVoice(c.Request.Context(), c, account, endpoint, body, contentType)

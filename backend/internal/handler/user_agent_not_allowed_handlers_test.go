@@ -565,3 +565,140 @@ func TestUserAgentNotAllowedGrokVoiceAfterUpstreamFailure(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "forbidden_error")
 	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
 }
+
+func uaCredentiallessGrokAccount() service.Account {
+	return service.Account{
+		ID:          23,
+		Platform:    service.PlatformGrok,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{},
+	}
+}
+
+// uaProfitFlipSchedulerCache returns a passing rate on the first read of the
+// allowed account and a veto rate afterwards. Selection admits the account;
+// the post-slot recheck then continues without opening the upstream.
+type uaProfitFlipSchedulerCache struct {
+	fakeSchedulerCache
+	allowedID   int64
+	allowedGets int
+	cheap       *service.Account
+	expensive   *service.Account
+	blocked     *service.Account
+}
+
+func (c *uaProfitFlipSchedulerCache) GetSnapshot(context.Context, service.SchedulerBucket) ([]*service.Account, bool, error) {
+	return []*service.Account{c.cheap, c.blocked}, true, nil
+}
+
+func (c *uaProfitFlipSchedulerCache) GetAccount(_ context.Context, id int64) (*service.Account, error) {
+	if c.blocked != nil && id == c.blocked.ID {
+		clone := *c.blocked
+		return &clone, nil
+	}
+	if id != c.allowedID {
+		return nil, nil
+	}
+	c.allowedGets++
+	src := c.cheap
+	if c.allowedGets > 1 {
+		src = c.expensive
+	}
+	if src == nil {
+		return nil, nil
+	}
+	clone := *src
+	return &clone, nil
+}
+
+func TestUserAgentNotAllowedGrokAfterUnprobedContinue(t *testing.T) {
+	t.Run("realtime credential", func(t *testing.T) {
+		cfg := &config.Config{RunMode: config.RunModeSimple}
+		billing := newSimpleBillingForUATest(t)
+		upstream := &uaFilterStatusUpstream{status: http.StatusBadGateway}
+		repo := &uaFilterAccountRepoStub{accounts: []service.Account{
+			uaCredentiallessGrokAccount(),
+			uaBlockedGrokAccount(),
+		}}
+		concurrency := service.NewConcurrencyService(nil)
+		gateway := service.NewOpenAIGatewayService(
+			repo, nil, nil, nil, nil, nil, nil, cfg, nil, concurrency,
+			nil, nil, billing, upstream,
+			nil, nil, nil, nil, nil, nil, nil, nil,
+		)
+		h := NewOpenAIGatewayHandler(gateway, concurrency, billing, &service.APIKeyService{}, nil, nil, nil, nil, cfg)
+		c, rec := newUAGrokAudioContext("python-requests/2", http.MethodGet, "/v1/realtime", "")
+		c.Request.Header.Set("Upgrade", "websocket")
+		c.Request.Header.Set("Connection", "upgrade")
+
+		h.GrokRealtime(c)
+
+		require.Zero(t, upstream.calls)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		require.JSONEq(t, userAgentNotAllowedOpenAIBody, rec.Body.String())
+		require.Equal(t, service.UserAgentNotAllowedMessage, gjson.Get(rec.Body.String(), "error.message").String())
+	})
+
+	t.Run("voice slot", func(t *testing.T) {
+		cfg := &config.Config{RunMode: config.RunModeSimple}
+		billing := newSimpleBillingForUATest(t)
+		upstream := &uaFilterStatusUpstream{status: http.StatusBadGateway}
+		cheapRate := 0.1
+		expensiveRate := 0.9
+		cheap := uaAllowedGrokAccount()
+		cheap.RateMultiplier = &cheapRate
+		expensive := cheap
+		expensive.RateMultiplier = &expensiveRate
+		expensive.UpdatedAt = time.Now()
+		blocked := uaBlockedGrokAccount()
+		cache := &uaProfitFlipSchedulerCache{
+			allowedID: cheap.ID,
+			cheap:     &cheap,
+			expensive: &expensive,
+			blocked:   &blocked,
+		}
+		snapshot := service.NewSchedulerSnapshotService(cache, nil, nil, nil, cfg)
+		concurrency := service.NewConcurrencyService(nil)
+		gateway := service.NewOpenAIGatewayService(
+			nil, nil, nil, nil, nil, nil, nil, cfg, snapshot, concurrency,
+			nil, nil, billing, upstream,
+			nil, nil, nil, nil, nil, nil, nil, nil,
+		)
+		h := NewOpenAIGatewayHandler(gateway, concurrency, billing, &service.APIKeyService{}, nil, nil, nil, nil, cfg)
+
+		groupID := int64(77)
+		group := &service.Group{
+			ID:                   groupID,
+			Platform:             service.PlatformGrok,
+			Status:               service.StatusActive,
+			Hydrated:             true,
+			RateMultiplier:       1,
+			ProfitControlEnabled: true,
+			ProfitMinMargin:      0.5,
+		}
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodPost, "/v1/tts", bytes.NewBufferString(`{"input":"hello"}`))
+		req.Header.Set("Content-Type", "application/json")
+		ctx := service.WithInboundUserAgent(req.Context(), "python-requests/2")
+		ctx = context.WithValue(ctx, ctxkey.Group, group)
+		c.Request = req.WithContext(ctx)
+		c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+			ID:      9,
+			GroupID: &groupID,
+			User:    &service.User{ID: 4, Status: service.StatusActive},
+			Group:   group,
+		})
+
+		h.GrokVoice(c, "stt")
+
+		require.GreaterOrEqual(t, cache.allowedGets, 2)
+		require.Zero(t, upstream.calls)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		require.JSONEq(t, userAgentNotAllowedOpenAIBody, rec.Body.String())
+		require.Equal(t, service.UserAgentNotAllowedMessage, gjson.Get(rec.Body.String(), "error.message").String())
+	})
+}
