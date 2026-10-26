@@ -6534,6 +6534,13 @@ const handleGrokImportSSO = async (ssoInput: string) => {
   }
 
   try {
+    // Step 1 already validated the filter. Rebuild extra here so allow/block
+    // patterns are stored. Null stops the import. Off returns undefined and
+    // omits both keys.
+    const createExtra = withCreateAccountExtra(undefined)
+    if (createExtra === null) {
+      return
+    }
     const result = await adminAPI.grok.createFromSSO({
       sso_tokens: ssoTokens,
       name: form.name || undefined,
@@ -6541,6 +6548,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
       proxy_id: form.proxy_id,
       group_ids: form.group_ids,
       credentials,
+      extra: createExtra,
       concurrency: form.concurrency,
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
