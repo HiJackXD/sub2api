@@ -171,6 +171,7 @@ type AccountBulkUpdate struct {
 	// EnsureCodexFingerprintSeed asks the repository to atomically preserve an
 	// existing valid Codex fingerprint seed or create one for eligible rows.
 	EnsureCodexFingerprintSeed bool
+	ClearUserAgentFilter       bool
 }
 
 // CreateAccountRequest 创建账号请求
@@ -233,6 +234,12 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 			return nil, err
 		}
 	}
+
+	extra, _, err := NormalizeUserAgentFilterExtra(req.Extra)
+	if err != nil {
+		return nil, err
+	}
+	req.Extra = extra
 
 	// 创建账号
 	account := &Account{
@@ -344,6 +351,11 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		delete(extra, OllamaCloudUsageSessionExtraKey)
 		delete(extra, OllamaCloudUsageAutoRefreshExtraKey)
 		delete(extra, OllamaCloudUsageSnapshotExtraKey)
+		normalized, _, err := NormalizeUserAgentFilterExtra(extra)
+		if err != nil {
+			return nil, err
+		}
+		extra = normalized
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, extra)
 	} else {
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)

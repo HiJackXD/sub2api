@@ -112,3 +112,69 @@ func TestUAFilterStatsErrorPriority(t *testing.T) {
 	require.ErrorIs(t, passed.errorOr(ErrNoAvailableAccounts), ErrNoAvailableAccounts)
 	require.False(t, errors.Is(passed.errorOr(ErrNoAvailableAccounts), ErrUserAgentNotAllowed))
 }
+
+func TestNormalizeUserAgentFilterExtra(t *testing.T) {
+	t.Parallel()
+	normalized, clear, err := NormalizeUserAgentFilterExtra(map[string]any{"other": true})
+	require.NoError(t, err)
+	require.False(t, clear)
+	require.Equal(t, true, normalized["other"])
+
+	normalized, clear, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "off",
+		"ua_filter_patterns": []any{"claude-cli/"},
+		"other":              "keep",
+	})
+	require.NoError(t, err)
+	require.True(t, clear)
+	_, hasMode := normalized["ua_filter_mode"]
+	_, hasPatterns := normalized["ua_filter_patterns"]
+	require.False(t, hasMode)
+	require.False(t, hasPatterns)
+	require.Equal(t, "keep", normalized["other"])
+
+	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{"ua_filter_mode": "allow"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ua_filter_patterns")
+
+	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{"ua_filter_mode": "sometimes"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ua_filter_mode")
+
+	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "block",
+		"ua_filter_patterns": []any{"a", "curl"},
+	})
+	require.Error(t, err)
+
+	long := strings.Repeat("x", 129)
+	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "block",
+		"ua_filter_patterns": []any{long},
+	})
+	require.Error(t, err)
+
+	tooMany := make([]any, 51)
+	for i := range tooMany {
+		tooMany[i] = "curl"
+	}
+	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "block",
+		"ua_filter_patterns": tooMany,
+	})
+	require.Error(t, err)
+
+	_, _, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "block",
+		"ua_filter_patterns": []any{"cu\nr"},
+	})
+	require.Error(t, err)
+
+	normalized, clear, err = NormalizeUserAgentFilterExtra(map[string]any{
+		"ua_filter_mode":     "allow",
+		"ua_filter_patterns": []any{" Claude-CLI/ ", "claude-cli/", "  ", "opencode/"},
+	})
+	require.NoError(t, err)
+	require.False(t, clear)
+	require.Equal(t, []string{"Claude-CLI/", "opencode/"}, normalized["ua_filter_patterns"])
+}

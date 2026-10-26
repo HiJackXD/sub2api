@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
@@ -16,6 +17,7 @@ const (
 	UAFilterModeOff            = "off"
 	UAFilterModeAllow          = "allow"
 	UAFilterModeBlock          = "block"
+	UAFilterClearOnMergeKey    = "__ua_filter_clear__"
 	UserAgentNotAllowedMessage = "No available account accepts this User-Agent"
 	uaFilterInvalidMode        = "invalid"
 	uaFilterLogMaxBytes        = 256
@@ -121,6 +123,84 @@ func uaFilterStoredPatterns(extra map[string]any) ([]string, bool) {
 		return nil, false
 	}
 	return valid, true
+}
+
+func NormalizeUserAgentFilterExtra(extra map[string]any) (map[string]any, bool, error) {
+	if extra == nil {
+		return nil, false, nil
+	}
+	delete(extra, UAFilterClearOnMergeKey)
+	_, hasMode := extra[UAFilterExtraModeKey]
+	_, hasPatterns := extra[UAFilterExtraPatternsKey]
+	if !hasMode && !hasPatterns {
+		return extra, false, nil
+	}
+	rawMode, modeIsString := extra[UAFilterExtraModeKey].(string)
+	if hasMode && !modeIsString {
+		return nil, false, infraerrors.BadRequest("UA_FILTER_MODE_INVALID", "ua_filter_mode must be off, allow, or block")
+	}
+	modeRaw := strings.TrimSpace(rawMode)
+	if !hasMode || modeRaw == "" || modeRaw == UAFilterModeOff {
+		if hasMode && modeRaw != "" && modeRaw != UAFilterModeOff {
+			return nil, false, infraerrors.BadRequest("UA_FILTER_MODE_INVALID", "ua_filter_mode must be off, allow, or block")
+		}
+		delete(extra, UAFilterExtraModeKey)
+		delete(extra, UAFilterExtraPatternsKey)
+		return extra, true, nil
+	}
+	if modeRaw != UAFilterModeAllow && modeRaw != UAFilterModeBlock {
+		return nil, false, infraerrors.BadRequest("UA_FILTER_MODE_INVALID", "ua_filter_mode must be off, allow, or block")
+	}
+	patterns, err := normalizeUAFilterPatternInput(extra[UAFilterExtraPatternsKey])
+	if err != nil {
+		return nil, false, err
+	}
+	extra[UAFilterExtraModeKey] = modeRaw
+	extra[UAFilterExtraPatternsKey] = patterns
+	return extra, false, nil
+}
+
+func normalizeUAFilterPatternInput(raw any) ([]string, error) {
+	var items []any
+	switch typed := raw.(type) {
+	case []string:
+		items = make([]any, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
+		}
+	case []any:
+		items = typed
+	default:
+		return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns must contain at least one pattern when ua_filter_mode is allow or block")
+	}
+	if len(items) > 50 {
+		return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns must contain at least one pattern when ua_filter_mode is allow or block")
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text, ok := item.(string)
+		if !ok {
+			return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns contains an invalid pattern")
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		if !uaFilterPatternAcceptable(text) {
+			return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns contains an invalid pattern")
+		}
+		key := strings.ToLower(text)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, text)
+	}
+	if len(out) == 0 || len(out) > 50 {
+		return nil, infraerrors.BadRequest("UA_FILTER_PATTERNS_INVALID", "ua_filter_patterns must contain at least one pattern when ua_filter_mode is allow or block")
+	}
+	return out, nil
 }
 
 func uaFilterPatternAcceptable(pattern string) bool {
