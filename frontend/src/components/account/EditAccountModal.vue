@@ -1780,6 +1780,12 @@
         :type="account.type"
       />
 
+      <UserAgentFilterFields
+        :model-value="uaFilter"
+        :invalid="uaFilterInvalid"
+        @update:model-value="onUAFilterUpdate"
+      />
+
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
@@ -3254,6 +3260,8 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
+import UserAgentFilterFields from '@/components/account/UserAgentFilterFields.vue'
+import { normalizeUAFilter, type UAFilterMode } from '@/components/account/uaFilter'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
@@ -3784,6 +3792,22 @@ const upstreamBillingRateSyncEnabled = ref(false)
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
 // 上游ID：直接上游声明请求标识的响应头名，留空不记录。
 const upstreamRequestIdHeader = ref('')
+const uaFilter = ref<{ mode: UAFilterMode; patterns: string[] }>({ mode: 'off', patterns: [] })
+const uaFilterInvalid = ref(false)
+const onUAFilterUpdate = (value: { mode: UAFilterMode; patterns: string[] }) => {
+  uaFilter.value = { mode: value.mode, patterns: [...value.patterns] }
+  uaFilterInvalid.value = false
+}
+const readAccountUAFilter = (extra: unknown): { mode: 'off' | 'allow' | 'block'; patterns: string[] } => {
+  const record = extra && typeof extra === 'object' ? extra as Record<string, unknown> : {}
+  const patterns = Array.isArray(record.ua_filter_patterns)
+    ? record.ua_filter_patterns.filter((item): item is string => typeof item === 'string')
+    : []
+  if (record.ua_filter_mode === 'allow' || record.ua_filter_mode === 'block') {
+    return { mode: record.ua_filter_mode, patterns }
+  }
+  return { mode: 'off', patterns }
+}
 const readUpstreamRequestIdHeader = (extra: unknown): string => {
   const value = (extra as Record<string, unknown> | undefined)?.upstream_request_id_header
   return typeof value === 'string' ? value : ''
@@ -4328,6 +4352,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
+	uaFilter.value = readAccountUAFilter(extra)
+	uaFilterInvalid.value = false
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
@@ -5323,6 +5349,49 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
   }
 }
 
+const applyEditUserAgentFilter = (updatePayload: Record<string, unknown>): boolean => {
+  const result = normalizeUAFilter(uaFilter.value.mode, uaFilter.value.patterns)
+  if (!result.ok) {
+    uaFilterInvalid.value = true
+    appStore.showError(
+      uaFilter.value.patterns.some((item) => item.trim() !== '')
+        ? t('admin.accounts.uaFilter.invalidPattern')
+        : t('admin.accounts.uaFilter.emptyList')
+    )
+    return false
+  }
+  uaFilterInvalid.value = false
+  if (result.mode !== 'off' && result.mode !== 'allow' && result.mode !== 'block') {
+    return true
+  }
+  const accountExtra = (props.account?.extra as Record<string, unknown> | undefined) || {}
+  const existing = updatePayload.extra as Record<string, unknown> | undefined
+  const storedMode = accountExtra.ua_filter_mode === 'allow' || accountExtra.ua_filter_mode === 'block'
+    ? accountExtra.ua_filter_mode
+    : 'off'
+  const storedPatterns = Array.isArray(accountExtra.ua_filter_patterns)
+    ? accountExtra.ua_filter_patterns.filter((item): item is string => typeof item === 'string')
+    : []
+  const changed = result.mode === 'off'
+    ? 'ua_filter_mode' in accountExtra || 'ua_filter_patterns' in accountExtra
+    : storedMode !== result.mode
+      || storedPatterns.length !== result.patterns.length
+      || storedPatterns.some((item, index) => item !== result.patterns[index])
+  if (!existing && !changed) {
+    return true
+  }
+  const next: Record<string, unknown> = { ...(existing ?? accountExtra) }
+  if (result.mode === 'off') {
+    delete next.ua_filter_mode
+    delete next.ua_filter_patterns
+  } else {
+    next.ua_filter_mode = result.mode
+    next.ua_filter_patterns = result.patterns
+  }
+  updatePayload.extra = next
+  return true
+}
+
 const handleSubmit = async () => {
   if (!props.account) return
   const accountID = props.account.id
@@ -6087,6 +6156,10 @@ const handleSubmit = async () => {
         delete newExtra.upstream_request_id_header
       }
       updatePayload.extra = newExtra
+    }
+
+    if (!applyEditUserAgentFilter(updatePayload)) {
+      return
     }
 
     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {

@@ -637,6 +637,25 @@ export default {
         sub2apiNote: 'Matches the request ID column of its usage log',
         official: '{platform} official API'
       },
+      uaFilter: {
+        title: 'User-Agent filter',
+        hint: 'Matches the inbound User-Agent. Off disables the filter. Allow uses this account only when one pattern matches. Block skips this account when one pattern matches.',
+        mode: 'Mode',
+        off: 'Off',
+        allow: 'Allow',
+        block: 'Block',
+        unchanged: 'Unchanged',
+        presetClaudeCode: 'Claude Code',
+        presetCodex: 'Codex',
+        presetOpenCode: 'OpenCode',
+        customPattern: 'Custom pattern',
+        customPatternPlaceholder: 'Substring to match',
+        addPattern: 'Add',
+        patterns: 'Patterns',
+        removePattern: 'Remove',
+        emptyList: 'Allow and block require at least one pattern.',
+        invalidPattern: 'Each pattern must be 3–128 characters without control characters, and there can be at most 50 patterns.'
+      },
       // OpenAI specific hints
       openai: {
         baseUrlHint: 'Leave default for official OpenAI API',
