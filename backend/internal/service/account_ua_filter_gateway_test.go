@@ -11,6 +11,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSelectAccountForModelWithPlatform_UserAgentSkipsMetadataProjection(t *testing.T) {
+	// Snapshot shape: only ua_filter_mode and ua_filter_patterns.
+	// repository.buildSchedulerMetadataAccount is not imported here; service
+	// importing repository would cycle.
+	projectedExtra := map[string]any{
+		UAFilterExtraModeKey:     "allow",
+		UAFilterExtraPatternsKey: []any{"claude-cli/"},
+	}
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true, Extra: projectedExtra},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 2, Status: StatusActive, Schedulable: true},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+	svc := &GatewayService{accountRepo: repo, cache: &mockGatewayCacheForPlatform{}, cfg: testConfig()}
+	ctx := WithInboundUserAgent(context.Background(), "python-requests/2.32")
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), acc.ID)
+}
+
 func TestSelectAccountForModelWithPlatform_UserAgentSkipsRestrictedAccount(t *testing.T) {
 	repo := &mockAccountRepoForPlatform{
 		accounts: []Account{

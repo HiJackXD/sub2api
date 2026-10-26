@@ -1046,6 +1046,11 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		service.OpenAIAutoResetCredit7dThresholdExtraKey,
 		service.OpenAIAutoResetCreditStateExtraKey,
 		"model_rate_limits",
+		// 入站 User-Agent 规则跑在本投影上。listSchedulableAccounts 的缓存命中读的是
+		// filterSchedulerExtra 的结果；缺 ua_filter_mode 时 UserAgentFilterMode 视为 off，
+		// 候选循环会放行本应拒绝的账号。
+		service.UAFilterExtraModeKey,
+		service.UAFilterExtraPatternsKey,
 		service.UpstreamBillingProbeExtraKey,
 		service.GrokMediaEligibleExtraKey,
 		"grok_billing_snapshot",
