@@ -20,7 +20,8 @@
 - Normalization trims each pattern, drops empty strings, dedupes case-insensitively, and keeps the first original casing.
 - Each pattern is 3–128 Unicode code points, at most 50 patterns, and ASCII control characters U+0000–U+001F and U+007F are rejected.
 - Admin API errors use the existing admin error envelope and name `ua_filter_mode` or `ua_filter_patterns`.
-- Stored dirty data fails closed at request time.
+- An unknown `ua_filter_mode` with a valid pattern list is treated as `block` at request time: a hit fails, a miss passes. Example: mode `deny` and pattern `python-requests` rejects `python-requests/2.32` and accepts `curl/8.0` and `claude-cli/2.1.1`.
+- An unknown mode with no valid patterns, or `allow`/`block` with invalid patterns, fails closed at request time.
 - Presets expand to literals. Claude Code writes `claude-cli/`. Codex writes `codex_cli_rs/`, `codex-tui/`, `codex_vscode/`, `codex_vscode_copilot/`, `codex_app/`, `codex_chatgpt_desktop/`, `codex_atlas/`, `codex_exec/`, `codex_sdk_ts/`, and `codex desktop`. OpenCode writes `opencode/`. Do not store `codex ` or bare `codex`.
 - Disabled mode allows every User-Agent, including an empty one.
 - Enabled mode rejects a missing, empty, or whitespace-only User-Agent.
