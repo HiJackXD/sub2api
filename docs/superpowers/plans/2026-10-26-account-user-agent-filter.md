@@ -31,7 +31,7 @@
 - User-request gateways set the context even when the header is absent, storing an empty string and marking the request.
 - A rejected account is excluded for that request only: no status change, no failure count, no concurrency slot, and no upstream request.
 - Apply the filter in every `GatewayService` user-request selection loop, including sticky hits; in the OpenAI scheduler candidate filter, session sticky, and `previous_response_id` pin; and in `GeminiMessagesCompatService` selection and sticky hits, including Antigravity accounts selected there.
-- A sticky account blocked by the rule is not used, and that session binding is deleted.
+- A sticky account blocked by the rule is not used, and that session binding is deleted. This request does not store the replacement account as the new sticky binding. The next request with the same session selects again.
 - A `previous_response_id` account blocked by the rule is not used. The stored response mapping is not deleted.
 - Candidate set means accounts already accepted for this selection by group, platform, and model, before this rule and before transient unschedulability. `excludedIDs` are not candidates.
 - If any candidate passes the rule and the existing scheduler, select it.
