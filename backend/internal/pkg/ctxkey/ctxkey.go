@@ -81,4 +81,7 @@ const (
 
 	// ClaudeCodeVersion stores the extracted Claude Code version from User-Agent (e.g. "2.1.22")
 	ClaudeCodeVersion Key = "ctx_claude_code_version"
+
+	// InboundUserAgent 标记用户请求的原始 User-Agent。键不存在表示内部调用。
+	InboundUserAgent Key = "ctx_inbound_user_agent"
 )
