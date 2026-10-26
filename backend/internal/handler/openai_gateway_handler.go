@@ -696,6 +696,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				if legacyCompact && errors.Is(err, service.ErrNoAvailableCompactAccounts) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -718,6 +722,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, requestPlatform)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
@@ -1329,6 +1337,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				if err != nil {
 					cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
@@ -1348,6 +1360,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)

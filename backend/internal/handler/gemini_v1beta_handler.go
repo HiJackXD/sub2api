@@ -570,6 +570,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				reqLog.Info("gemini.account_select_aborted_client_disconnected", zap.Error(err))
 				return
 			}
+			if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+				googleErrorWithType(c, status, errType, "", message)
+				return
+			}
 			if cachedContentBinding != nil {
 				if fs.LastFailoverErr != nil {
 					h.handleGeminiCachedContentFailoverExhausted(c, fs.LastFailoverErr)

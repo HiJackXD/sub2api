@@ -322,3 +322,25 @@ func TestGPT55RetirementEmptyListingDoesNotUseDefaults(t *testing.T) {
 	require.Empty(t, modelListingSource(service.PlatformOpenAI, []string{}, []string{"gpt-5.5"}))
 	require.Equal(t, []string{"gpt-5.5"}, modelListingSource(service.PlatformOpenAI, nil, []string{"gpt-5.5"}))
 }
+
+func TestUserAgentNotAllowedResponseEnvelopes(t *testing.T) {
+	status, errType, message, ok := userAgentNotAllowedResponse(fmt.Errorf("wrap: %w", service.ErrUserAgentNotAllowed))
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, status)
+	require.Equal(t, "forbidden_error", errType)
+	require.Equal(t, service.UserAgentNotAllowedMessage, message)
+
+	_, _, _, ok = userAgentNotAllowedResponse(service.ErrNoAvailableAccounts)
+	require.False(t, ok)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	(&GatewayHandler{}).errorResponse(c, status, errType, message)
+	require.JSONEq(t, `{"type":"error","error":{"type":"forbidden_error","message":"No available account accepts this User-Agent"}}`, w.Body.String())
+
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	(&OpenAIGatewayHandler{}).errorResponse(c, status, errType, message)
+	require.JSONEq(t, `{"error":{"type":"forbidden_error","message":"No available account accepts this User-Agent"}}`, w.Body.String())
+}

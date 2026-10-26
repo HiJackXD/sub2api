@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -178,6 +179,13 @@ func classifyOpenAICompatibleNoAccountErrorFromGin(
 		displayModel,
 		openAICompatibleRequestPlatform(ctx, apiKey),
 	)
+}
+
+func userAgentNotAllowedResponse(err error) (int, string, string, bool) {
+	if !errors.Is(err, service.ErrUserAgentNotAllowed) {
+		return 0, "", "", false
+	}
+	return http.StatusForbidden, "forbidden_error", service.UserAgentNotAllowedMessage, true
 }
 
 func openAICompatibleSelectionErrorForLog(err error, platform string) error {
