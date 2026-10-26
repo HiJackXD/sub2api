@@ -167,6 +167,7 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 
 	var lastUpstreamErr *service.GeminiCachedContentUpstreamError
 	var ttlRejectedLimit time.Duration
+	var selectionErr error
 	for attempts := 0; attempts < geminiCachedContentCreateMaxAttempts; {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, "", modelName, excluded, "", int64(0))
 		if err != nil {
@@ -174,6 +175,7 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 				return
 			}
 			reqLog.Info("gemini.cached_content.account_select_exhausted", zap.Error(err))
+			selectionErr = err
 			break
 		}
 		account := selection.Account
@@ -326,6 +328,10 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 	}
 	if ttlRejectedLimit > 0 {
 		googleError(c, http.StatusBadRequest, fmt.Sprintf("ttl exceeds the maximum allowed %ds by the upstream accounts", int64(ttlRejectedLimit.Seconds())))
+		return
+	}
+	if status, errType, message, ok := userAgentNotAllowedResponse(selectionErr); ok {
+		googleErrorWithType(c, status, errType, "", message)
 		return
 	}
 	markOpsRoutingCapacityLimited(c)

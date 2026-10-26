@@ -82,6 +82,10 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})
 			return
 		}
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			googleErrorWithType(c, status, errType, "", message)
+			return
+		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
 		return
@@ -266,6 +270,10 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		if hasAntigravity {
 			// antigravity 账户使用静态模型信息
 			c.JSON(http.StatusOK, gemini.FallbackModel(modelName))
+			return
+		}
+		if status, errType, message, ok := userAgentNotAllowedResponse(err); ok {
+			googleErrorWithType(c, status, errType, "", message)
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)

@@ -70,13 +70,15 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	var token string
 	var upstream *service.GrokRealtimeUpstream
 	var candidateSeen bool
+	var selectErr error
 	for attempts := 0; attempts < 4; attempts++ {
 		// Realtime's voice model is not a text-model capability. Passing a
 		// concrete text model here would reject accounts mapped only to an
 		// older/default text model before the upstream handshake can decide.
 		// An empty requested model keeps account selection capability-based;
 		// the actual voice model remains in the upstream WS query below.
-		candidate, _, selectErr := h.gatewayService.SelectAccountWithSchedulerForCapability(
+		var candidate *service.AccountSelectionResult
+		candidate, _, selectErr = h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(), apiKey.GroupID, "", "", "", failed,
 			service.OpenAIUpstreamTransportHTTPSSE,
 			service.OpenAIEndpointCapabilityChatCompletions,
@@ -125,6 +127,10 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		break
 	}
 	if selection == nil || selection.Account == nil || release == nil || upstream == nil {
+		if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
+			h.errorResponse(c, status, errType, message)
+			return
+		}
 		if !candidateSeen {
 			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available Grok accounts")
 		} else {
@@ -262,6 +268,10 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			service.PlatformGrok,
 		)
 		if selectErr != nil || selection == nil || selection.Account == nil {
+			if status, errType, message, ok := userAgentNotAllowedResponse(selectErr); ok {
+				h.errorResponse(c, status, errType, message)
+				return
+			}
 			if last != nil {
 				h.handleFailoverExhausted(c, last, false)
 			} else {
