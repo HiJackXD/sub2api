@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -64,22 +65,75 @@ func TestSelectAccountForModelWithPlatform_InternalCallIgnoresFilter(t *testing.
 }
 
 func TestSelectAccountForModelWithPlatform_UserAgentPassButQuotaBlocked(t *testing.T) {
+	groupID := int64(7)
+	// RequirePrivacySet does not reject Anthropic: IsPrivacySet is always true
+	// for that platform. The model rate limit is the later check, after the
+	// loader returns the account and the User-Agent rule accepts it.
+	resetAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	repo := &mockAccountRepoForPlatform{
 		accounts: []Account{{
-			ID: 1, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Priority: 1,
+			ID: 1, Platform: PlatformAnthropic, Priority: 1,
 			Status: StatusActive, Schedulable: true,
 			Extra: map[string]any{
 				"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"},
-				"quota_limit": 1.0, "quota_used": 2.0,
+				"model_rate_limits": map[string]any{
+					"claude-3-5-sonnet-20241022": map[string]any{
+						"rate_limit_reset_at": resetAt,
+					},
+				},
 			},
 		}},
 		accountsByID: map[int64]*Account{},
 	}
 	repo.accountsByID[1] = &repo.accounts[0]
-	svc := &GatewayService{accountRepo: repo, cache: &mockGatewayCacheForPlatform{}, cfg: testConfig()}
-	_, err := svc.selectAccountForModelWithPlatform(WithInboundUserAgent(context.Background(), "claude-cli/2.1.1"), nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	groupRepo := &mockGroupRepoForGateway{
+		groups: map[int64]*Group{
+			groupID: {ID: groupID, Name: "privacy-required", RequirePrivacySet: true},
+		},
+	}
+	svc := &GatewayService{
+		accountRepo: repo,
+		groupRepo:   groupRepo,
+		cache:       &mockGatewayCacheForPlatform{},
+		cfg:         testConfig(),
+	}
+	_, err := svc.selectAccountForModelWithPlatform(
+		WithInboundUserAgent(context.Background(), "claude-cli/2.1.1"),
+		&groupID,
+		"",
+		"claude-3-5-sonnet-20241022",
+		nil,
+		PlatformAnthropic,
+	)
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
 	require.False(t, errors.Is(err, ErrUserAgentNotAllowed))
+}
+
+func TestSelectAccountForModelWithPlatform_UserAgentStickyClearDoesNotRebind(t *testing.T) {
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true, Extra: map[string]any{
+				"ua_filter_mode": "allow", "ua_filter_patterns": []string{"claude-cli/"},
+			}},
+			{ID: 2, Platform: PlatformAnthropic, Priority: 2, Status: StatusActive, Schedulable: true},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+	cache := &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{"sess": 1}}
+	svc := &GatewayService{accountRepo: repo, cache: cache, cfg: testConfig()}
+	ctx := WithStickyBindingClearedByUserAgent(WithInboundUserAgent(context.Background(), "python-requests/2.32"))
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "sess", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), acc.ID)
+	require.Equal(t, int64(0), cache.sessionBindings["sess"])
+
+	require.NoError(t, svc.BindStickySession(ctx, nil, "sess", acc.ID))
+	require.NoError(t, svc.BindStickySessionAfterProfitAdmission(ctx, nil, "sess", acc.ID))
+	require.NoError(t, svc.bindGatewayStickySessionDuringSelection(ctx, nil, "sess", acc.ID))
+	require.Equal(t, int64(0), cache.sessionBindings["sess"])
 }
 
 func TestSelectAccountForModelWithPlatform_NonStickyUserAgentKeepsSession(t *testing.T) {

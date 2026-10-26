@@ -103,6 +103,7 @@ func (s *GatewayService) stickyUserAgentBlocked(ctx context.Context, account *Ac
 	}
 	if sessionHash != "" && s.cache != nil && account.ID == stickyAccountID {
 		_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+		markStickyBindingClearedByUserAgent(ctx)
 		return true, true
 	}
 	return true, false
@@ -1993,7 +1994,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 						platformOK := account.Platform == platform
 						modelSupported := requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)
 						uaBlocked := false
-						if profitOK && groupOK && platformOK && modelSupported {
+						if groupOK && platformOK && modelSupported {
 							blocked, cleared := s.stickyUserAgentBlocked(ctx, account, &uaStats, groupID, sessionHash, stickyAccountID)
 							uaBlocked = blocked
 							if cleared {
@@ -2132,7 +2133,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 					platformOK := account.Platform == platform
 					modelSupported := requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)
 					uaBlocked := false
-					if profitOK && groupOK && platformOK && modelSupported {
+					if groupOK && platformOK && modelSupported {
 						blocked, cleared := s.stickyUserAgentBlocked(ctx, account, &uaStats, groupID, sessionHash, stickyAccountID)
 						uaBlocked = blocked
 						if cleared {
@@ -2294,7 +2295,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 						platformOK := account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled())
 						modelSupported := requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)
 						uaBlocked := false
-						if profitOK && groupOK && platformOK && modelSupported {
+						if groupOK && platformOK && modelSupported {
 							blocked, cleared := s.stickyUserAgentBlocked(ctx, account, &uaStats, groupID, sessionHash, stickyAccountID)
 							uaBlocked = blocked
 							if cleared {
@@ -2434,7 +2435,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					platformOK := account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled())
 					modelSupported := requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)
 					uaBlocked := false
-					if profitOK && groupOK && platformOK && modelSupported {
+					if groupOK && platformOK && modelSupported {
 						blocked, cleared := s.stickyUserAgentBlocked(ctx, account, &uaStats, groupID, sessionHash, stickyAccountID)
 						uaBlocked = blocked
 						if cleared {

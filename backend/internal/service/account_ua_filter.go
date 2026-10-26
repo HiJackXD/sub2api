@@ -7,8 +7,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 const (
@@ -34,6 +34,39 @@ func WithInboundUserAgent(ctx context.Context, userAgent string) context.Context
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, ctxkey.InboundUserAgent, inboundUserAgentValue{Value: userAgent})
+}
+
+// WithStickyBindingClearedByUserAgent installs the pointer setInboundUserAgent
+// puts on the request context. Selection sets it when this request deletes a
+// sticky binding for User-Agent. Handlers read the same pointer, including
+// through child contexts, and must not store a replacement account.
+func WithStickyBindingClearedByUserAgent(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if flag, ok := ctx.Value(ctxkey.StickyBindingClearedByUserAgent).(*bool); ok && flag != nil {
+		return ctx
+	}
+	cleared := false
+	return context.WithValue(ctx, ctxkey.StickyBindingClearedByUserAgent, &cleared)
+}
+
+func markStickyBindingClearedByUserAgent(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	flag, _ := ctx.Value(ctxkey.StickyBindingClearedByUserAgent).(*bool)
+	if flag != nil {
+		*flag = true
+	}
+}
+
+func stickyBindingClearedByUserAgentRequest(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	flag, _ := ctx.Value(ctxkey.StickyBindingClearedByUserAgent).(*bool)
+	return flag != nil && *flag
 }
 
 func InboundUserAgentFromContext(ctx context.Context) (string, bool) {

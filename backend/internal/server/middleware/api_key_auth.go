@@ -289,7 +289,11 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 }
 
 func setInboundUserAgent(c *gin.Context) {
-	c.Request = c.Request.WithContext(service.WithInboundUserAgent(c.Request.Context(), c.GetHeader("User-Agent")))
+	ctx := service.WithInboundUserAgent(c.Request.Context(), c.GetHeader("User-Agent"))
+	// Pointer so a child context created during selection still updates the
+	// value later binds observe on this request context.
+	ctx = service.WithStickyBindingClearedByUserAgent(ctx)
+	c.Request = c.Request.WithContext(ctx)
 }
 
 func apiKeyHeadersTooLarge(c *gin.Context) bool {
