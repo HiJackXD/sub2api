@@ -467,6 +467,11 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		if escapedSticky {
 			req.PreserveStickyBinding = true
 		}
+	} else if s.service != nil && req.StickyAccountID > 0 {
+		account, loadErr := s.service.getSchedulableAccount(ctx, req.StickyAccountID)
+		if loadErr == nil {
+			_ = s.service.clearStickySessionForUserAgent(ctx, req.GroupID, strings.TrimSpace(req.SessionHash), account, req.RequestedModel, req.RequireCompact, req.PreserveStickyBinding)
+		}
 	}
 
 	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req)
@@ -526,6 +531,9 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	account, err := s.service.getSchedulableAccount(ctx, accountID)
 	if err != nil || account == nil {
 		clearBinding()
+		return nil, false, nil
+	}
+	if s.service.clearStickySessionForUserAgent(ctx, req.GroupID, sessionHash, account, req.RequestedModel, req.RequireCompact, req.PreserveStickyBinding) {
 		return nil, false, nil
 	}
 	if shouldClearStickySession(account, req.RequestedModel) || account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() || !account.IsSchedulable() {
@@ -1400,7 +1408,13 @@ func (s openAISelectionFilterStats) summary(extra string) string {
 func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
-) (*AccountSelectionResult, int, int, float64, error) {
+) (_ *AccountSelectionResult, _ int, _ int, _ float64, err error) {
+	ctx, uaStats := withUAFilterStats(ctx)
+	defer func() {
+		if err != nil {
+			err = uaStats.errorOr(err)
+		}
+	}()
 	budget := newOpenAISelectionProbeBudget()
 	accounts, err := s.service.listSchedulableAccounts(ctx, req.GroupID, req.Platform)
 	if err != nil {
@@ -1814,6 +1828,11 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}
 	if req.RequestedModel != "" && !supportsOpenAIRequestModel(account, req.RequestedModel, req.RequireCompact) {
 		return false, "model_not_supported"
+	}
+	// Count a User-Agent candidate only after the model check. A model miss
+	// stays model_not_supported and must not increment uaFilterStats.
+	if userAgentBlocksCandidate(ctx, account, nil) {
+		return false, "user_agent"
 	}
 	if req.GroupID != nil && s != nil && s.service != nil &&
 		s.service.needsUpstreamChannelRestrictionCheck(ctx, req.GroupID) &&
@@ -2310,6 +2329,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	ctx = WithStickyBindingClearedByUserAgent(ctx)
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
 	// 分组利润控制：唯一文本调度入口的防御性装门。handler 文本

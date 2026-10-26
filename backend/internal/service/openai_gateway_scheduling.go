@@ -231,8 +231,36 @@ func resolveOpenAIUpstreamOriginator(c *gin.Context, isOfficialClient bool) stri
 	return "opencode"
 }
 
+// clearStickySessionForUserAgent drops a pinned OpenAI session when that account
+// fails the inbound User-Agent rule. A model miss returns false and does not
+// count the account or delete the binding. A User-Agent miss deletes the
+// binding unless preserve is set, and marks the request so this request does
+// not store a replacement account.
+func (s *OpenAIGatewayService) clearStickySessionForUserAgent(ctx context.Context, groupID *int64, sessionHash string, account *Account, requestedModel string, requireCompact bool, preserve bool) bool {
+	if s == nil || account == nil {
+		return false
+	}
+	if strings.TrimSpace(requestedModel) != "" && !supportsOpenAIRequestModel(account, requestedModel, requireCompact) {
+		return false
+	}
+	var uaStats uaFilterStats
+	if !userAgentBlocksCandidate(ctx, account, &uaStats) {
+		return false
+	}
+	sessionHash = strings.TrimSpace(sessionHash)
+	if preserve || sessionHash == "" {
+		return true
+	}
+	_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+	markStickyBindingClearedByUserAgent(ctx)
+	return true
+}
+
 // BindStickySession sets session -> account binding with standard TTL.
 func (s *OpenAIGatewayService) BindStickySession(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
+	if stickyBindingClearedByUserAgentRequest(ctx) {
+		return nil
+	}
 	if sessionHash == "" || accountID <= 0 {
 		return nil
 	}
@@ -902,7 +930,14 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 
 // selectAccountForModelWithExclusionsStickyHit 与 selectAccountForModelWithExclusions 相同，
 // 另返回账号是否来自粘性会话命中。
-func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, bool, error) {
+func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (_ *Account, _ bool, err error) {
+	ctx = WithStickyBindingClearedByUserAgent(ctx)
+	ctx, uaStats := withUAFilterStats(ctx)
+	defer func() {
+		if err != nil {
+			err = uaStats.errorOr(err)
+		}
+	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -973,6 +1008,11 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 
 	account, err := s.getSchedulableAccount(ctx, accountID)
 	if err != nil {
+		return nil
+	}
+	// Eligibility below checks the model with requireCompact false. Match that
+	// so a model miss is not treated as a User-Agent failure.
+	if s.clearStickySessionForUserAgent(ctx, groupID, sessionHash, account, requestedModel, false, false) {
 		return nil
 	}
 
@@ -1048,6 +1088,10 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		fresh = s.recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx, fresh, groupID, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {
 			filterStats.exclude("ineligible")
+			continue
+		}
+		if userAgentBlocksCandidate(ctx, fresh, nil) {
+			filterStats.exclude("user_agent")
 			continue
 		}
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
@@ -1135,7 +1179,14 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 	return s.selectAccountWithLoadAwareness(ctx, groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, "", true)
 }
 
-func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (*AccountSelectionResult, error) {
+func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (_ *AccountSelectionResult, err error) {
+	ctx = WithStickyBindingClearedByUserAgent(ctx)
+	ctx, uaStats := withUAFilterStats(ctx)
+	defer func() {
+		if err != nil {
+			err = uaStats.errorOr(err)
+		}
+	}()
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -1211,11 +1262,15 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if accountID > 0 && !isExcluded(accountID) {
 			account, err := s.getSchedulableAccount(ctx, accountID)
 			if err == nil {
-				clearSticky := shouldClearStickySession(account, requestedModel)
+				uaBlocked := s.clearStickySessionForUserAgent(ctx, groupID, sessionHash, account, requestedModel, false, false)
+				clearSticky := false
+				if !uaBlocked {
+					clearSticky = shouldClearStickySession(account, requestedModel)
+				}
 				if clearSticky {
 					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 				}
-				if !clearSticky && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
+				if !uaBlocked && !clearSticky && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
 					account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
 					if account == nil {
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
@@ -1284,6 +1339,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		// are not selected again before the bucket is rebuilt.
 		if reason := openAICompatibleAccountEligibilityFailureReason(ctx, acc, platform, requestedModel, false, requiredCapability); reason != "" {
 			filterStats.exclude(reason)
+			continue
+		}
+		if userAgentBlocksCandidate(ctx, acc, nil) {
+			filterStats.exclude("user_agent")
 			continue
 		}
 		if !parentHealthyForShadow(acc, parentLookupL2) {

@@ -476,6 +476,12 @@ func (s *OpenAIGatewayService) selectAccountByPreviousResponseIDForCapability(
 	if accountID <= 0 || account == nil || store == nil {
 		return nil, nil
 	}
+	// previous_response_id is not a session sticky binding. A User-Agent miss
+	// skips this account and leaves the stored response-account mapping in place.
+	var uaStats uaFilterStats
+	if userAgentBlocksCandidate(ctx, account, &uaStats) {
+		return nil, nil
+	}
 
 	result, acquireErr := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 	if acquireErr == nil && result.Acquired {

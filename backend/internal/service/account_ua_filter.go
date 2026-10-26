@@ -305,7 +305,34 @@ func (s uaFilterStats) errorOr(existing error) error {
 	return existing
 }
 
+type uaFilterStatsContextKey struct{}
+
+// withUAFilterStats threads one counter through a selection request.
+// A nested call returns the counter already stored on ctx so sticky and
+// load-balance passes increment the same candidates, passes, and failures.
+func withUAFilterStats(ctx context.Context) (context.Context, *uaFilterStats) {
+	if stats := uaFilterStatsFromContext(ctx); stats != nil {
+		return ctx, stats
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stats := &uaFilterStats{}
+	return context.WithValue(ctx, uaFilterStatsContextKey{}, stats), stats
+}
+
+func uaFilterStatsFromContext(ctx context.Context) *uaFilterStats {
+	if ctx == nil {
+		return nil
+	}
+	stats, _ := ctx.Value(uaFilterStatsContextKey{}).(*uaFilterStats)
+	return stats
+}
+
 func userAgentBlocksCandidate(ctx context.Context, account *Account, stats *uaFilterStats) bool {
+	if stats == nil {
+		stats = uaFilterStatsFromContext(ctx)
+	}
 	userAgent, enforced := InboundUserAgentFromContext(ctx)
 	if !enforced || account == nil {
 		return false
