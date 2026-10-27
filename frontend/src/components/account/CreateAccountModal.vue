@@ -3436,6 +3436,11 @@
         </div>
       </div>
 
+      <ModelCapabilityOverrideFields
+        id-prefix="create-account-capability"
+        v-model="modelCapabilityOverrides"
+      />
+
       <!-- OpenAI API 长上下文计费开关 -->
       <div
         v-if="form.platform === 'openai' && !hideAccountLongContextBilling && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
@@ -4149,6 +4154,13 @@ import type {
   OpenAIEndpointCapability,
   TempUnschedulableScope
 } from '@/types'
+import ModelCapabilityOverrideFields from '@/components/admin/group/ModelCapabilityOverrideFields.vue'
+import {
+  emptyModelCapabilityForm,
+  modelCapabilityFormToAPI,
+  validateModelCapabilityForm,
+  type ModelCapabilityForm,
+} from '@/views/admin/modelCapabilityOverrides'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
@@ -4247,9 +4259,17 @@ const oauthStepTitle = computed(() => {
 // 上游ID：直接上游声明请求标识的响应头名，留空不记录。
 const upstreamRequestIdHeader = ref('')
 const withUpstreamRequestIdHeader = <T extends Record<string, unknown> | undefined>(extra: T): T | Record<string, unknown> => {
+  const capabilityError = validateModelCapabilityForm(modelCapabilityOverrides.value)
+  if (capabilityError) {
+    throw new Error(t(capabilityError))
+  }
+  const stamped: Record<string, unknown> = {
+    ...(extra || {}),
+    model_capability_overrides: modelCapabilityFormToAPI(modelCapabilityOverrides.value),
+  }
   const name = upstreamRequestIdHeader.value.trim()
-  if (!name) return extra
-  return { ...(extra || {}), upstream_request_id_header: name }
+  if (!name) return stamped
+  return { ...stamped, upstream_request_id_header: name }
 }
 
 const baseUrlHint = computed(() => {
@@ -4703,6 +4723,7 @@ const openaiPassthroughEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
+const modelCapabilityOverrides = ref<ModelCapabilityForm>(emptyModelCapabilityForm())
 const openAILongContextBillingTouched = ref(false)
 const openAICompactMode = ref<OpenAICompactMode>('auto')
 const openAIResponsesMode = ref<OpenAIResponsesMode>('auto')
@@ -5669,6 +5690,7 @@ const resetForm = () => {
   openaiPassthroughEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
   openAILongContextBillingEnabled.value = false
+  modelCapabilityOverrides.value = emptyModelCapabilityForm()
   openAILongContextBillingTouched.value = false
   openAICompactMode.value = 'auto'
   openAIResponsesMode.value = 'auto'
@@ -5951,6 +5973,12 @@ const handleSubmit = async () => {
       return
     }
     step.value = 2
+    return
+  }
+
+  const capabilityError = validateModelCapabilityForm(modelCapabilityOverrides.value)
+  if (capabilityError) {
+    appStore.showError(t(capabilityError))
     return
   }
 
@@ -6279,6 +6307,11 @@ const createAccountAndFinish = async (
   credentials: Record<string, unknown>,
   extra?: Record<string, unknown>
 ) => {
+  const capabilityError = validateModelCapabilityForm(modelCapabilityOverrides.value)
+  if (capabilityError) {
+    appStore.showError(t(capabilityError))
+    return
+  }
   if (!applyTempUnschedConfig(credentials)) {
     return
   }

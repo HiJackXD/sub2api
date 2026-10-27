@@ -1023,6 +1023,10 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	if err := service.ValidateModelCapabilityOverridesExtra(req.Extra); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
 		return
@@ -1167,6 +1171,10 @@ func (h *AccountHandler) Update(c *gin.Context) {
 	// base_rpm 输入校验：负值归零，超过 10000 截断
 	sanitizeExtraBaseRPM(req.Extra)
 	if err := service.ValidateUpstreamRequestIDHeaderExtra(req.Extra); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if err := service.ValidateModelCapabilityOverridesExtra(req.Extra); err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
@@ -1625,6 +1633,10 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	if err := service.ValidateModelCapabilityOverridesExtra(req.Extra); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	if err := service.ValidateUpstreamRequestIDHeaderExtra(req.Extra); err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -2080,6 +2092,10 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 	}
 	for _, item := range req.Accounts {
 		if err := service.ValidateOpenAILongContextBillingExtra(item.Platform, item.Extra); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		if err := service.ValidateModelCapabilityOverridesExtra(item.Extra); err != nil {
 			response.ErrorFrom(c, err)
 			return
 		}

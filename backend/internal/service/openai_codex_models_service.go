@@ -159,6 +159,10 @@ func (s *OpenAIGatewayService) BuildGroupConfiguredCodexModelsManifest(
 	if err != nil {
 		return nil, false, fmt.Errorf("build group configured Codex models: %w", err)
 	}
+	body, err = applyCatalogModelCapabilityOverrides(body, group, catalog, PlatformOpenAI, nil, true)
+	if err != nil {
+		return nil, false, fmt.Errorf("apply model capability overrides: %w", err)
+	}
 	manifest := &OpenAIModelsResponse{
 		Body: body,
 		ETag: codexModelsManifestBodyETag(body),
@@ -216,6 +220,14 @@ func (s *OpenAIGatewayService) MergeGroupConfiguredCodexModels(
 		return fmt.Errorf("filter retired Codex models: %w", err)
 	}
 	body = filtered
+	nextBody, err := applyCatalogModelCapabilityOverrides(body, group, accounts, group.Platform, nil, true)
+	if err != nil {
+		return fmt.Errorf("apply model capability overrides: %w", err)
+	}
+	if !bytes.Equal(nextBody, body) {
+		body = nextBody
+		changed = true
+	}
 	if changed || retired {
 		manifest.Body = body
 		manifest.ETag = codexModelsManifestBodyETag(body)
@@ -862,19 +874,19 @@ func (s *GatewayService) BuildCodexModelsManifestForGroup(
 	modelIDs []string,
 ) ([]byte, error) {
 	if s == nil || s.accountRepo == nil || group == nil {
-		return BuildCodexModelsManifest(modelIDs)
+		return buildCodexModelsManifestWithGroupOverrides(modelIDs, group)
 	}
 	effectivePlatform := strings.TrimSpace(platformOverride)
 	if effectivePlatform == "" {
 		effectivePlatform = group.Platform
 	}
 	if effectivePlatform != PlatformComposite && !isConcreteRequestPlatform(effectivePlatform) {
-		return BuildCodexModelsManifest(modelIDs)
+		return buildCodexModelsManifestWithGroupOverrides(modelIDs, group)
 	}
 
 	_, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID)
 	if err != nil {
-		return BuildCodexModelsManifest(modelIDs)
+		return buildCodexModelsManifestWithGroupOverrides(modelIDs, group)
 	}
 	var compositeRoutes []CompositeModelRoute
 	compositeRoutesAvailable := true
@@ -956,7 +968,20 @@ func buildCodexModelsManifestForAccounts(
 			modelMetadata[modelID] = metadata
 		}
 	}
-	return buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
+	body, err := buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
+	if err != nil {
+		return nil, err
+	}
+	return applyCatalogModelCapabilityOverrides(body, group, accounts, effectivePlatform, compositeRoutes, compositeRoutesAvailable)
+}
+
+func buildCodexModelsManifestWithGroupOverrides(modelIDs []string, group *Group) ([]byte, error) {
+	body, err := BuildCodexModelsManifest(modelIDs)
+	if err != nil || group == nil || group.ModelCapabilityOverrides.IsZero() {
+		return body, err
+	}
+	platform := strings.TrimSpace(group.Platform)
+	return applyCatalogModelCapabilityOverrides(body, group, nil, platform, nil, false)
 }
 
 func buildCodexModelsManifest(

@@ -309,10 +309,15 @@ func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, 
 	models := make([]json.RawMessage, 0)
 	modelIDs := make([]string, 0)
 	byID := make(map[string]json.RawMessage)
+	accountOverrides := map[string]ModelCapabilityOverrides{}
 	for _, result := range results {
 		_, entries, err := modelCatalogEntries(result.response.Body, "data")
 		if err != nil {
 			return nil, nil, err
+		}
+		var sourceOverrides ModelCapabilityOverrides
+		if result.account != nil {
+			sourceOverrides = result.account.ModelCapabilityOverrides()
 		}
 		for _, raw := range entries {
 			var model struct {
@@ -325,6 +330,9 @@ func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, 
 				byID[model.ID] = raw
 				modelIDs = append(modelIDs, model.ID)
 				models = append(models, raw)
+				if !sourceOverrides.IsZero() {
+					accountOverrides[model.ID] = sourceOverrides
+				}
 			}
 		}
 	}
@@ -337,6 +345,10 @@ func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, 
 	}{Object: "list", Data: models})
 	if err != nil {
 		return nil, nil, err
+	}
+	body, err = applyModelCapabilityOverridesBody(body, group.ModelCapabilityOverrides, accountOverrides)
+	if err != nil {
+		return nil, nil, fmt.Errorf("apply model capability overrides: %w", err)
 	}
 	response := &OpenAIModelsResponse{Body: body, ETag: codexModelsManifestBodyETag(body)}
 	return openAIModelsResponseForClient(response, ifNoneMatch), results[0].account, nil

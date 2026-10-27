@@ -2371,6 +2371,12 @@
         />
       </div>
 
+      <ModelCapabilityOverrideFields
+        v-if="!isSparkShadow"
+        id-prefix="edit-account-capability"
+        v-model="modelCapabilityOverrides"
+      />
+
       <!-- OpenAI API 长上下文计费开关 -->
       <div
         v-if="account?.platform === 'openai' && !isSparkShadow && !hideAccountLongContextBilling && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
@@ -3249,6 +3255,14 @@ import type {
   OpenCodeGoUsageWindow,
   TempUnschedulableScope
 } from '@/types'
+import ModelCapabilityOverrideFields from '@/components/admin/group/ModelCapabilityOverrideFields.vue'
+import {
+  emptyModelCapabilityForm,
+  modelCapabilityFormFromAPI,
+  modelCapabilityFormToAPI,
+  validateModelCapabilityForm,
+  type ModelCapabilityForm,
+} from '@/views/admin/modelCapabilityOverrides'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
@@ -3846,6 +3860,7 @@ const openaiPassthroughEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
+const modelCapabilityOverrides = ref<ModelCapabilityForm>(emptyModelCapabilityForm())
 // OpenAI 订阅档位（Plus / Pro 20x / Pro 5x / Business Standard / Business Premium / Free）手动覆盖值,
 // 存于 credentials.plan_type;'' 表示清空/自动识别
 const editPlanType = ref<string>('')
@@ -4346,6 +4361,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   openaiPassthroughEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
   openAILongContextBillingEnabled.value = false
+  modelCapabilityOverrides.value = modelCapabilityFormFromAPI(extra?.model_capability_overrides)
   editPlanType.value = ''
   openAICompactMode.value = 'auto'
   openAIResponsesMode.value = 'auto'
@@ -5299,6 +5315,18 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 }
 
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
+  if (!isSparkShadow.value) {
+    const capabilityError = validateModelCapabilityForm(modelCapabilityOverrides.value)
+    if (capabilityError) {
+      appStore.showError(t(capabilityError))
+      return
+    }
+    const extra = {
+      ...((updatePayload.extra as Record<string, unknown> | undefined) ?? {}),
+      model_capability_overrides: modelCapabilityFormToAPI(modelCapabilityOverrides.value),
+    }
+    updatePayload = { ...updatePayload, extra }
+  }
   submitting.value = true
   try {
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))

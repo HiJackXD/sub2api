@@ -1241,6 +1241,10 @@ func init() {
 	groupDescProfitSafetyBuffer := groupFields[63].Descriptor()
 	// group.DefaultProfitSafetyBuffer holds the default value on creation for the profit_safety_buffer field.
 	group.DefaultProfitSafetyBuffer = groupDescProfitSafetyBuffer.Default.(float64)
+	// groupDescModelCapabilityOverrides is the schema descriptor for model_capability_overrides field.
+	groupDescModelCapabilityOverrides := groupFields[64].Descriptor()
+	// group.DefaultModelCapabilityOverrides holds the default value on creation for the model_capability_overrides field.
+	group.DefaultModelCapabilityOverrides = groupDescModelCapabilityOverrides.Default.(domain.ModelCapabilityOverrides)
 	idempotencyrecordMixin := schema.IdempotencyRecord{}.Mixin()
 	idempotencyrecordMixinFields0 := idempotencyrecordMixin[0].Fields()
 	_ = idempotencyrecordMixinFields0
