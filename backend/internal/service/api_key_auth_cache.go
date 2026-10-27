@@ -121,6 +121,8 @@ type APIKeyAuthGroupSnapshot struct {
 	MaxReasoningEffortOverLimit string `json:"max_reasoning_effort_over_limit,omitempty"`
 	// ReasoningEffortMappings rewrites explicit effort values before the ceiling.
 	ReasoningEffortMappings []ReasoningEffortMapping `json:"reasoning_effort_mappings"`
+	// ModelCapabilityOverrides 客户端模型清单展示覆盖。认证分组直接用于 /models。
+	ModelCapabilityOverrides ModelCapabilityOverrides `json:"model_capability_overrides,omitempty"`
 
 	// 高峰时段倍率：PeakRateEnabled 为 true 且请求时刻处于 [PeakStart, PeakEnd) 时，
 	// token 计费倍率额外乘以 PeakRateMultiplier（详见 Group.PeakMultiplierAt）。

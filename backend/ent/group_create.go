@@ -912,6 +912,20 @@ func (_c *GroupCreate) SetNillableProfitSafetyBuffer(v *float64) *GroupCreate {
 	return _c
 }
 
+// SetModelCapabilityOverrides sets the "model_capability_overrides" field.
+func (_c *GroupCreate) SetModelCapabilityOverrides(v domain.ModelCapabilityOverrides) *GroupCreate {
+	_c.mutation.SetModelCapabilityOverrides(v)
+	return _c
+}
+
+// SetNillableModelCapabilityOverrides sets the "model_capability_overrides" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableModelCapabilityOverrides(v *domain.ModelCapabilityOverrides) *GroupCreate {
+	if v != nil {
+		_c.SetModelCapabilityOverrides(*v)
+	}
+	return _c
+}
+
 // AddAPIKeyIDs adds the "api_keys" edge to the APIKey entity by IDs.
 func (_c *GroupCreate) AddAPIKeyIDs(ids ...int64) *GroupCreate {
 	_c.mutation.AddAPIKeyIDs(ids...)
@@ -1221,6 +1235,10 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultProfitSafetyBuffer
 		_c.mutation.SetProfitSafetyBuffer(v)
 	}
+	if _, ok := _c.mutation.ModelCapabilityOverrides(); !ok {
+		v := group.DefaultModelCapabilityOverrides
+		_c.mutation.SetModelCapabilityOverrides(v)
+	}
 	return nil
 }
 
@@ -1430,6 +1448,9 @@ func (_c *GroupCreate) check() error {
 	}
 	if _, ok := _c.mutation.ProfitSafetyBuffer(); !ok {
 		return &ValidationError{Name: "profit_safety_buffer", err: errors.New(`ent: missing required field "Group.profit_safety_buffer"`)}
+	}
+	if _, ok := _c.mutation.ModelCapabilityOverrides(); !ok {
+		return &ValidationError{Name: "model_capability_overrides", err: errors.New(`ent: missing required field "Group.model_capability_overrides"`)}
 	}
 	return nil
 }
@@ -1725,6 +1746,10 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ProfitSafetyBuffer(); ok {
 		_spec.SetField(group.FieldProfitSafetyBuffer, field.TypeFloat64, value)
 		_node.ProfitSafetyBuffer = value
+	}
+	if value, ok := _c.mutation.ModelCapabilityOverrides(); ok {
+		_spec.SetField(group.FieldModelCapabilityOverrides, field.TypeJSON, value)
+		_node.ModelCapabilityOverrides = value
 	}
 	if nodes := _c.mutation.APIKeysIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -2947,6 +2972,18 @@ func (u *GroupUpsert) UpdateProfitSafetyBuffer() *GroupUpsert {
 // AddProfitSafetyBuffer adds v to the "profit_safety_buffer" field.
 func (u *GroupUpsert) AddProfitSafetyBuffer(v float64) *GroupUpsert {
 	u.Add(group.FieldProfitSafetyBuffer, v)
+	return u
+}
+
+// SetModelCapabilityOverrides sets the "model_capability_overrides" field.
+func (u *GroupUpsert) SetModelCapabilityOverrides(v domain.ModelCapabilityOverrides) *GroupUpsert {
+	u.Set(group.FieldModelCapabilityOverrides, v)
+	return u
+}
+
+// UpdateModelCapabilityOverrides sets the "model_capability_overrides" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateModelCapabilityOverrides() *GroupUpsert {
+	u.SetExcluded(group.FieldModelCapabilityOverrides)
 	return u
 }
 
@@ -4241,6 +4278,20 @@ func (u *GroupUpsertOne) AddProfitSafetyBuffer(v float64) *GroupUpsertOne {
 func (u *GroupUpsertOne) UpdateProfitSafetyBuffer() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateProfitSafetyBuffer()
+	})
+}
+
+// SetModelCapabilityOverrides sets the "model_capability_overrides" field.
+func (u *GroupUpsertOne) SetModelCapabilityOverrides(v domain.ModelCapabilityOverrides) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetModelCapabilityOverrides(v)
+	})
+}
+
+// UpdateModelCapabilityOverrides sets the "model_capability_overrides" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateModelCapabilityOverrides() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateModelCapabilityOverrides()
 	})
 }
 
@@ -5701,6 +5752,20 @@ func (u *GroupUpsertBulk) AddProfitSafetyBuffer(v float64) *GroupUpsertBulk {
 func (u *GroupUpsertBulk) UpdateProfitSafetyBuffer() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateProfitSafetyBuffer()
+	})
+}
+
+// SetModelCapabilityOverrides sets the "model_capability_overrides" field.
+func (u *GroupUpsertBulk) SetModelCapabilityOverrides(v domain.ModelCapabilityOverrides) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetModelCapabilityOverrides(v)
+	})
+}
+
+// UpdateModelCapabilityOverrides sets the "model_capability_overrides" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateModelCapabilityOverrides() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateModelCapabilityOverrides()
 	})
 }
 

@@ -647,6 +647,10 @@
           v-model:over-limit="createForm.max_reasoning_effort_over_limit"
           v-model:mappings="createForm.reasoning_effort_mappings"
         />
+        <ModelCapabilityOverrideFields
+          id-prefix="create-group-capability"
+          v-model="createForm.model_capability_overrides"
+        />
         <div
           v-if="createForm.subscription_type !== 'subscription'"
           data-tour="group-form-exclusive"
@@ -2284,6 +2288,10 @@
           v-model:max-effort="editForm.max_reasoning_effort"
           v-model:over-limit="editForm.max_reasoning_effort_over_limit"
           v-model:mappings="editForm.reasoning_effort_mappings"
+        />
+        <ModelCapabilityOverrideFields
+          id-prefix="edit-group-capability"
+          v-model="editForm.model_capability_overrides"
         />
         <div v-if="editForm.subscription_type !== 'subscription'">
           <div class="mb-1.5 flex items-center gap-1">
@@ -4305,6 +4313,13 @@ import GroupRateMultipliersModal from "@/components/admin/group/GroupRateMultipl
 import GroupRPMOverridesModal from "@/components/admin/group/GroupRPMOverridesModal.vue";
 import GroupCapacityBadge from "@/components/common/GroupCapacityBadge.vue";
 import ReasoningEffortPolicyFields from "@/components/admin/group/ReasoningEffortPolicyFields.vue";
+import ModelCapabilityOverrideFields from "@/components/admin/group/ModelCapabilityOverrideFields.vue";
+import {
+  emptyModelCapabilityForm,
+  modelCapabilityFormFromAPI,
+  modelCapabilityFormToAPI,
+  validateModelCapabilityForm,
+} from "@/views/admin/modelCapabilityOverrides";
 import CodexManifestAccountsField from "@/components/admin/group/CodexManifestAccountsField.vue";
 import PricingEntryCard from "@/components/admin/channel/PricingEntryCard.vue";
 import type { PricingFormEntry } from "@/components/admin/channel/types";
@@ -5014,6 +5029,7 @@ const createForm = reactive({
   max_reasoning_effort: "",
   max_reasoning_effort_over_limit: reasoningEffortOverLimitDowngrade,
   reasoning_effort_mappings: [] as ReasoningEffortMappingRow[],
+  model_capability_overrides: emptyModelCapabilityForm(),
 });
 
 // 简单账号类型（用于模型路由选择）
@@ -5381,6 +5397,7 @@ const editForm = reactive({
   max_reasoning_effort: "",
   max_reasoning_effort_over_limit: reasoningEffortOverLimitDowngrade,
   reasoning_effort_mappings: [] as ReasoningEffortMappingRow[],
+  model_capability_overrides: emptyModelCapabilityForm(),
 });
 
 type ImagePricingFormState = {
@@ -5825,6 +5842,7 @@ const closeCreateModal = () => {
   createForm.max_reasoning_effort = "";
   createForm.max_reasoning_effort_over_limit = reasoningEffortOverLimitDowngrade;
   createForm.reasoning_effort_mappings = [];
+  createForm.model_capability_overrides = emptyModelCapabilityForm();
   createReasoningEffortPolicyRef.value?.resetValidation();
   resetModelAllowlistState(createModelAllowlistState);
   createModelRoutingRules.value = [];
@@ -5898,6 +5916,13 @@ const handleCreateGroup = async () => {
   if (!validateProfitControlForm(createForm)) {
     return;
   }
+  const createCapabilityError = validateModelCapabilityForm(
+    createForm.model_capability_overrides,
+  );
+  if (createCapabilityError) {
+    appStore.showError(t(createCapabilityError));
+    return;
+  }
   if (!validateGroupReasoningMultipliers(createForm.model_pricing)) return;
   // 模型白名单：开启且没有任何条目时阻止提交，与后端 400 对齐。
   if (
@@ -5965,6 +5990,9 @@ const handleCreateGroup = async () => {
           : undefined,
       reasoning_effort_mappings: reasoningEffortMappingsToAPI(
         createForm.reasoning_effort_mappings,
+      ),
+      model_capability_overrides: modelCapabilityFormToAPI(
+        createForm.model_capability_overrides,
       ),
       // 利润控制：界面百分比转小数提交；仅五个 token 平台可启用
       profit_control_enabled:
@@ -6136,6 +6164,9 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.mcp_xml_inject = group.mcp_xml_inject ?? true;
   editForm.copy_accounts_from_group_ids = []; // 复制账号字段每次编辑时重置为空
   editForm.rpm_limit = group.rpm_limit ?? 0;
+  editForm.model_capability_overrides = modelCapabilityFormFromAPI(
+    group.model_capability_overrides,
+  );
   editForm.max_reasoning_effort = normalizeReasoningEffortForPlatform(
     group.platform,
     group.max_reasoning_effort,
@@ -6188,6 +6219,7 @@ const closeEditModal = () => {
   editForm.max_reasoning_effort = "";
   editForm.max_reasoning_effort_over_limit = reasoningEffortOverLimitDowngrade;
   editForm.reasoning_effort_mappings = [];
+  editForm.model_capability_overrides = emptyModelCapabilityForm();
   editReasoningEffortPolicyRef.value?.resetValidation();
   editModelRoutingRules.value = [];
   editForm.copy_accounts_from_group_ids = [];
@@ -6235,6 +6267,13 @@ const handleUpdateGroup = async () => {
     return;
   }
   if (!validateProfitControlForm(editForm)) {
+    return;
+  }
+  const editCapabilityError = validateModelCapabilityForm(
+    editForm.model_capability_overrides,
+  );
+  if (editCapabilityError) {
+    appStore.showError(t(editCapabilityError));
     return;
   }
   if (!validateGroupReasoningMultipliers(editForm.model_pricing)) return;
@@ -6321,6 +6360,9 @@ const handleUpdateGroup = async () => {
           : undefined,
       reasoning_effort_mappings: reasoningEffortMappingsToAPI(
         editForm.reasoning_effort_mappings,
+      ),
+      model_capability_overrides: modelCapabilityFormToAPI(
+        editForm.model_capability_overrides,
       ),
       // 利润控制：界面百分比转小数提交；仅五个 token 平台可启用
       profit_control_enabled:

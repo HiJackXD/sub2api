@@ -150,6 +150,8 @@ const (
 	FieldProfitMinMargin = "profit_min_margin"
 	// FieldProfitSafetyBuffer holds the string denoting the profit_safety_buffer field in the database.
 	FieldProfitSafetyBuffer = "profit_safety_buffer"
+	// FieldModelCapabilityOverrides holds the string denoting the model_capability_overrides field in the database.
+	FieldModelCapabilityOverrides = "model_capability_overrides"
 	// EdgeAPIKeys holds the string denoting the api_keys edge name in mutations.
 	EdgeAPIKeys = "api_keys"
 	// EdgeRedeemCodes holds the string denoting the redeem_codes edge name in mutations.
@@ -292,6 +294,7 @@ var Columns = []string{
 	FieldProfitControlEnabled,
 	FieldProfitMinMargin,
 	FieldProfitSafetyBuffer,
+	FieldModelCapabilityOverrides,
 }
 
 var (
@@ -439,6 +442,8 @@ var (
 	DefaultProfitMinMargin float64
 	// DefaultProfitSafetyBuffer holds the default value on creation for the "profit_safety_buffer" field.
 	DefaultProfitSafetyBuffer float64
+	// DefaultModelCapabilityOverrides holds the default value on creation for the "model_capability_overrides" field.
+	DefaultModelCapabilityOverrides domain.ModelCapabilityOverrides
 )
 
 // OrderOption defines the ordering options for the Group queries.

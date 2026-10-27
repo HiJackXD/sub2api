@@ -22178,6 +22178,7 @@ type GroupMutation struct {
 	addprofit_min_margin                    *float64
 	profit_safety_buffer                    *float64
 	addprofit_safety_buffer                 *float64
+	model_capability_overrides              *domain.ModelCapabilityOverrides
 	clearedFields                           map[string]struct{}
 	api_keys                                map[int64]struct{}
 	removedapi_keys                         map[int64]struct{}
@@ -25600,6 +25601,42 @@ func (m *GroupMutation) ResetProfitSafetyBuffer() {
 	m.addprofit_safety_buffer = nil
 }
 
+// SetModelCapabilityOverrides sets the "model_capability_overrides" field.
+func (m *GroupMutation) SetModelCapabilityOverrides(dco domain.ModelCapabilityOverrides) {
+	m.model_capability_overrides = &dco
+}
+
+// ModelCapabilityOverrides returns the value of the "model_capability_overrides" field in the mutation.
+func (m *GroupMutation) ModelCapabilityOverrides() (r domain.ModelCapabilityOverrides, exists bool) {
+	v := m.model_capability_overrides
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldModelCapabilityOverrides returns the old "model_capability_overrides" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldModelCapabilityOverrides(ctx context.Context) (v domain.ModelCapabilityOverrides, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldModelCapabilityOverrides is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldModelCapabilityOverrides requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldModelCapabilityOverrides: %w", err)
+	}
+	return oldValue.ModelCapabilityOverrides, nil
+}
+
+// ResetModelCapabilityOverrides resets all changes to the "model_capability_overrides" field.
+func (m *GroupMutation) ResetModelCapabilityOverrides() {
+	m.model_capability_overrides = nil
+}
+
 // AddAPIKeyIDs adds the "api_keys" edge to the APIKey entity by ids.
 func (m *GroupMutation) AddAPIKeyIDs(ids ...int64) {
 	if m.api_keys == nil {
@@ -25958,7 +25995,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 67)
+	fields := make([]string, 0, 68)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -26160,6 +26197,9 @@ func (m *GroupMutation) Fields() []string {
 	if m.profit_safety_buffer != nil {
 		fields = append(fields, group.FieldProfitSafetyBuffer)
 	}
+	if m.model_capability_overrides != nil {
+		fields = append(fields, group.FieldModelCapabilityOverrides)
+	}
 	return fields
 }
 
@@ -26302,6 +26342,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.ProfitMinMargin()
 	case group.FieldProfitSafetyBuffer:
 		return m.ProfitSafetyBuffer()
+	case group.FieldModelCapabilityOverrides:
+		return m.ModelCapabilityOverrides()
 	}
 	return nil, false
 }
@@ -26445,6 +26487,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldProfitMinMargin(ctx)
 	case group.FieldProfitSafetyBuffer:
 		return m.OldProfitSafetyBuffer(ctx)
+	case group.FieldModelCapabilityOverrides:
+		return m.OldModelCapabilityOverrides(ctx)
 	}
 	return nil, fmt.Errorf("unknown Group field %s", name)
 }
@@ -26922,6 +26966,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetProfitSafetyBuffer(v)
+		return nil
+	case group.FieldModelCapabilityOverrides:
+		v, ok := value.(domain.ModelCapabilityOverrides)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetModelCapabilityOverrides(v)
 		return nil
 	}
 	return fmt.Errorf("unknown Group field %s", name)
@@ -27634,6 +27685,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldProfitSafetyBuffer:
 		m.ResetProfitSafetyBuffer()
+		return nil
+	case group.FieldModelCapabilityOverrides:
+		m.ResetModelCapabilityOverrides()
 		return nil
 	}
 	return fmt.Errorf("unknown Group field %s", name)

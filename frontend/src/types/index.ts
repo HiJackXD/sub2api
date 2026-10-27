@@ -668,6 +668,7 @@ export interface AdminGroup extends Group {
   messages_dispatch_model_config?: OpenAIMessagesDispatchModelConfig
   model_allowlist?: ModelAllowlist
   codex_models_manifest_config?: CodexModelsManifestConfig
+  model_capability_overrides?: ModelCapabilityOverrides
 
   // 分组排序
   sort_order: number
@@ -676,6 +677,13 @@ export interface AdminGroup extends Group {
 export interface ModelAllowlist {
   enabled: boolean
   models: string[]
+}
+
+export interface ModelCapabilityOverrides {
+  context_window?: number | null
+  max_context_window?: number | null
+  effective_context_window_percent?: number | null
+  max_output_tokens?: number | null
 }
 
 // 固定账号获取 Codex Model Manifest 配置（仅 openai 分组）

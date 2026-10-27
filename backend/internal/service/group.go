@@ -14,6 +14,7 @@ import (
 type OpenAIMessagesDispatchModelConfig = domain.OpenAIMessagesDispatchModelConfig
 type GroupCodexModelsManifestConfig = domain.GroupCodexModelsManifestConfig
 type ReasoningEffortMapping = domain.ReasoningEffortMapping
+type ModelCapabilityOverrides = domain.ModelCapabilityOverrides
 
 type Group struct {
 	ID             int64
@@ -132,6 +133,10 @@ type Group struct {
 	ProfitControlEnabled bool
 	ProfitMinMargin      float64 // 最低毛利率，小数存储（0.30=30%）
 	ProfitSafetyBuffer   float64 // 安全缓冲，小数，与 margin 相加后从 D 中扣除
+
+	// ModelCapabilityOverrides 替换客户端模型清单里已有的上下文等字段。
+	// 空值表示不改清单，也不改转发请求。
+	ModelCapabilityOverrides ModelCapabilityOverrides
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

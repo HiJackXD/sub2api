@@ -308,6 +308,12 @@ func (Group) Fields() []ent.Field {
 			SchemaType(map[string]string{dialect.Postgres: "decimal(10,4)"}).
 			Default(0).
 			Comment("安全缓冲，小数；与 margin 相加后从下游倍率中扣除，默认 0"),
+
+		// 客户端模型清单展示参数（migration 246）。只改对外 context_window 等字段。
+		field.JSON("model_capability_overrides", domain.ModelCapabilityOverrides{}).
+			Default(domain.ModelCapabilityOverrides{}).
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}).
+			Comment("分组级模型能力展示覆盖：context_window、max_context_window、effective_context_window_percent、max_output_tokens；空对象表示不改清单"),
 	}
 }
 
